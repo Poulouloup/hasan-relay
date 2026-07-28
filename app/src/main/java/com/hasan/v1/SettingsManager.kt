@@ -24,13 +24,14 @@ class SettingsManager(context: Context) {
         const val DEFAULT_VOLUME       = 100f
         const val DEFAULT_SPEED        = 1.0f
 
-        // Modèles wake word disponibles dans assets/
+        // Modèles wake word disponibles dans assets/ — nommés hasan-JJ-MM-YYYY selon leur
+        // date d'ajout (pas de sens fonctionnel dans le nom, juste un ordre chronologique).
         val WAKE_WORD_MODELS = listOf(
-            "ok_hasan_last_vers.onnx",
-            "ok_hasan_livekit.onnx",
-            "ok_hasan_v2_livekit.onnx"
+            "hasan-26-05-2026.onnx",
+            "hasan-27-05-2026.onnx",
+            "hasan-26-07-2026.onnx"
         )
-        const val DEFAULT_WAKE_WORD_MODEL = "ok_hasan_last_vers.onnx"
+        const val DEFAULT_WAKE_WORD_MODEL = "hasan-26-05-2026.onnx"
 
         // Voix Edge TTS françaises (endpoint non officiel "Lire à voix haute" de Microsoft Edge)
         val EDGE_TTS_VOICES = listOf(
@@ -109,7 +110,12 @@ class SettingsManager(context: Context) {
         set(value) = prefs.edit().putBoolean("relay_enabled", value).apply()
 
     var wakeWordModel: String
-        get() = prefs.getString("wake_word_model", DEFAULT_WAKE_WORD_MODEL) ?: DEFAULT_WAKE_WORD_MODEL
+        // Retombe sur le défaut si la valeur stockée ne correspond plus à un modèle connu —
+        // cas d'un renommage de fichier assets/ (ancien nom orphelin en pref) qui laisserait
+        // sinon le RadioOptionGroup sans sélection et le service pointer vers un asset absent.
+        get() = prefs.getString("wake_word_model", DEFAULT_WAKE_WORD_MODEL)
+            ?.takeIf { it in WAKE_WORD_MODELS }
+            ?: DEFAULT_WAKE_WORD_MODEL
         set(value) = prefs.edit().putString("wake_word_model", value).apply()
 
     // Stocké en Int (1–10) pour éviter les erreurs d'arrondi float dans Material Slider
