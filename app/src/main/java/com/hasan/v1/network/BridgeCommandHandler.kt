@@ -13,7 +13,7 @@ import org.json.JSONObject
 
 /**
  * Exécute les commandes reçues sur le canal `bridge` du relay WebSocket (voir
- * server/relay/bridge_commands.py côté serveur, plugin/tools/android_tool.py
+ * server/relay/bridge_commands.py côté serveur, plugin/hasan_delivery/tools.py
  * côté Hermes) et renvoie le résultat via la même connexion.
  *
  * S'exécute dans MainViewModel — l'app est nécessairement au premier plan ou
@@ -101,8 +101,8 @@ class BridgeCommandHandler(
 
     private fun respond(commandId: String, capability: String?, data: JSONObject? = null, error: String? = null) {
         // Un code d'erreur brut ("capability_disabled_by_user") remonte tel quel jusqu'au
-        // LLM via le MCP (phone-relay-mcp/server.js fait un JSON.stringify sans
-        // reformulation) — un champ "message" explicite évite que le LLM interprète à
+        // LLM via tools.py (json.dumps sans reformulation) — un champ "message"
+        // explicite évite que le LLM interprète à
         // tort un code ambigu comme un problème de config/permission à corriger plutôt
         // qu'un choix délibéré et permanent de l'utilisateur (Réglages → Tools & Permissions).
         val result = data ?: JSONObject().apply {

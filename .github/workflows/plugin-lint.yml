@@ -22,9 +22,9 @@ jobs:
           python-version: "3.11"
 
       # The plugin has no test suite (it depends on the Hermes gateway runtime,
-      # not available in this repo — see plugin/hasan_delivery/adapter.py and
-      # plugin/tools/android_tool.py docstrings). py_compile is the minimal
-      # safety net: catch a syntax error before it breaks an existing install
-      # on the next `git pull` + install-plugin.sh.
+      # not available in this repo — see plugin/hasan_delivery/adapter.py
+      # docstrings). py_compile is the minimal safety net: catch a syntax
+      # error before it breaks an existing install on the next `git pull` +
+      # install-plugin.sh.
       - name: Byte-compile check
-        run: python -m py_compile plugin/hasan_delivery/*.py plugin/tools/*.py
+        run: python -m py_compile plugin/hasan_delivery/*.py

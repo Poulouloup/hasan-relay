@@ -1,8 +1,12 @@
 package com.hasan.v1
 
+import android.content.Context
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import org.json.JSONObject
 
-/** Type attendu d'un paramètre de capability — reflète les types JSON Schema utilisés par hermes-relay (plugin/tools/_SCHEMAS). */
+/** Type attendu d'un paramètre de capability — reflète les types JSON Schema annoncés au relay (voir capabilitiesAnnouncementJson) et récupérés dynamiquement par plugin/hasan_delivery/tools.py. */
 enum class ParamType { STRING, INT, FLOAT, BOOLEAN }
 
 /** État d'affichage du badge de permission Android d'une capability (écran Tools & Permissions). */
@@ -69,4 +73,32 @@ fun schemaToJson(schema: List<ParamSpec>): JSONObject {
         put("properties", properties)
         put("required", required)
     }
+}
+
+/**
+ * Sérialise les capabilities activées par l'utilisateur ET dont la permission Android
+ * est accordée, au format annoncé au relay via l'envelope `system/capabilities` (voir
+ * ConnectionManager.kt) — c'est cette liste que `plugin/hasan_delivery/tools.py` récupère
+ * dynamiquement via `GET /capabilities`, pour ne plus dupliquer les schémas côté Python à
+ * chaque ajout de capability. N'annonce que ce qui est réellement exécutable maintenant :
+ * une capability désactivée ou sans permission serait un tool que Hermes croirait
+ * disponible alors que le téléphone la refuserait systématiquement (voir
+ * BridgeCommandHandler.kt, mêmes deux checks avant confirmation/exécution).
+ */
+fun capabilitiesAnnouncementJson(context: Context, settings: SettingsManager): JSONArray {
+    val array = JSONArray()
+    for (capability in ALL_CAPABILITIES) {
+        if (!settings.isCapabilityEnabled(capability.name)) continue
+        val permission = capability.permission
+        if (permission != null &&
+            ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
+        ) continue
+
+        array.put(JSONObject().apply {
+            put("name", capability.name)
+            put("description", context.getString(capability.descriptionRes))
+            put("parameters", schemaToJson(capability.parameters))
+        })
+    }
+    return array
 }

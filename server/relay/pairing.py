@@ -68,6 +68,12 @@ class Session:
     # (ex: session migrée depuis un ancien format sans refresh).
     refresh_token_hash: str | None = None
     refresh_expires_at: float | None = None  # time.time()
+    # Capabilities annoncées par l'app à la connexion WS (envelope
+    # system/capabilities, voir ConnectionManager.kt côté app) — None pour
+    # une session migrée depuis un ancien format sans ce champ, ou avant la
+    # première annonce. Exposé en lecture via GET /capabilities pour
+    # plugin/hasan_delivery/tools.py (voir server.py handle_capabilities).
+    capabilities: list[dict] | None = None
 
     def expired(self) -> bool:
         return time.time() - self.last_seen_at > SESSION_TOKEN_TTL_SECONDS
@@ -85,6 +91,7 @@ class Session:
             "last_seen_at": self.last_seen_at,
             "refresh_token_hash": self.refresh_token_hash,
             "refresh_expires_at": self.refresh_expires_at,
+            "capabilities": self.capabilities,
         }
 
     @staticmethod
@@ -97,6 +104,7 @@ class Session:
                 last_seen_at=float(data["last_seen_at"]),
                 refresh_token_hash=data.get("refresh_token_hash"),
                 refresh_expires_at=data.get("refresh_expires_at"),
+                capabilities=data.get("capabilities"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -171,6 +179,31 @@ class PairingManager:
         # (redeem/refresh/revoke) est un TTL légèrement sous-estimé au
         # rechargement, jamais une perte de session.
         return session
+
+    def get_session_by_device_hash(self, device_hash: str) -> Session | None:
+        """Retrouve la session la plus récente d'un device — indexation interne par
+        session_token, pas par device_hash, d'où l'itération. Un même device peut
+        avoir plusieurs sessions accumulées dans le temps (chaque pairing/reconnexion
+        n'en réutilise pas forcément une existante) : prendre max(last_seen_at) évite
+        de retomber sur une session ancienne et morte plutôt que la session active."""
+        matches = [s for s in self._sessions.values() if s.device_hash == device_hash]
+        if not matches:
+            return None
+        return max(matches, key=lambda s: s.last_seen_at)
+
+    def update_capabilities(self, device_hash: str, capabilities: list[dict]) -> None:
+        """Persiste les capabilities annoncées par l'app (envelope system/capabilities).
+
+        Comme touch(), évite une écriture disque à chaque appel — mais ici la
+        comparaison de contenu (pas juste un TTL glissant) permet de ne
+        persister que sur un changement réel, ce qui reste rare (une
+        reconnexion WS n'implique pas forcément un changement de capabilities).
+        """
+        session = self.get_session_by_device_hash(device_hash)
+        if session is None or session.capabilities == capabilities:
+            return
+        session.capabilities = capabilities
+        self._save_to_disk()
 
     def refresh(self, refresh_token: str) -> RefreshResult | None:
         """Échange un refresh_token contre un nouveau (session_token, refresh_token).

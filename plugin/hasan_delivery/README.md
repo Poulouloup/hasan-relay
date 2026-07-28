@@ -77,7 +77,10 @@ journalctl --user -u hermes-gateway.service -f | grep -i hasan_delivery
 
 ## Portée
 
-Ce plugin ne couvre que le canal de messagerie texte (`send`/`receive`). Le
-contrôle d'écran du téléphone (`plugin/tools/android_tool.py`) est un sujet
-distinct, volontairement non intégré — voir la note en tête de ce fichier
-dans le repo.
+Ce plugin ne couvre que le canal de messagerie texte (`send`/`receive`).
+Les capabilities téléphone (SMS, localisation, etc.) sont un sujet distinct,
+exposées à Hermes via un serveur MCP séparé
+(`~/.hermes/phone-relay-mcp/server.js`, hors de ce repo) qui appelle
+`POST /bridge/command` sur le même relay — voir
+`server/relay/bridge_commands.py` côté serveur et
+`app/src/main/java/com/hasan/v1/network/BridgeCommandHandler.kt` côté app.

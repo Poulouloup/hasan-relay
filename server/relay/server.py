@@ -300,6 +300,22 @@ async def handle_phone_outbound(request: web.Request) -> web.Response:
     return web.json_response({"pending": request.app[KEY_PUSH_BUFFER].pending_count(device_hash)})
 
 
+async def handle_capabilities(request: web.Request) -> web.Response:
+    """Capabilities annoncées par le device (envelope system/capabilities), pour
+    plugin/hasan_delivery/tools.py — évite de dupliquer les schémas des capabilities
+    téléphone côté Python : l'app reste la seule source de vérité (Capability.kt).
+
+    Liste vide (pas d'erreur) si le device ne s'est encore jamais connecté depuis
+    l'ajout de ce mécanisme, ou n'a annoncé aucune capability activée+autorisée.
+    """
+    device_hash = _require_session(request)
+    if device_hash is None:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    session = request.app[KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    capabilities = session.capabilities if session and session.capabilities else []
+    return web.json_response({"capabilities": capabilities})
+
+
 async def handle_bridge_command(request: web.Request) -> web.Response:
     """Entrée pour le plugin Hermes (tool function-calling) : exécute une
     capability sur le téléphone via le canal `bridge` du WS, attend le
@@ -457,6 +473,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                     active_connections=active_connections,
                     hermes_api_base_url=request.app[KEY_HERMES_API_BASE_URL],
                     hermes_api_token=request.app[KEY_HERMES_API_TOKEN],
+                    pairing_manager=request.app[KEY_PAIRING_MANAGER],
                 )
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 log.warning("WS erreur device_hash=%s...: %s", device_hash[:8], ws.exception())
@@ -545,6 +562,7 @@ async def _dispatch_inbound(
     active_connections: dict[str, web.WebSocketResponse],
     hermes_api_base_url: str,
     hermes_api_token: str,
+    pairing_manager: PairingManager,
 ) -> None:
     try:
         data = json.loads(raw)
@@ -556,6 +574,14 @@ async def _dispatch_inbound(
     if envelope.channel == "system" and envelope.type == "ping":
         pong = Envelope(channel="system", type="pong", payload={}).to_dict()
         await ws.send_json(pong)
+        return
+
+    if envelope.channel == "system" and envelope.type == "capabilities":
+        caps = envelope.payload.get("capabilities")
+        if isinstance(caps, list):
+            pairing_manager.update_capabilities(device_hash, caps)
+        else:
+            log.warning("Enveloppe system/capabilities malformée (capabilities non-liste) id=%s", envelope.id)
         return
 
     if envelope.channel == "bridge" and envelope.type == "command_result":
@@ -660,6 +686,7 @@ def create_app(
     app.router.add_get("/phone/replies", handle_phone_replies)
     app.router.add_get("/phone/outbound", handle_phone_outbound)
     app.router.add_post("/bridge/command", handle_bridge_command)
+    app.router.add_get("/capabilities", handle_capabilities)
     app.router.add_get("/ws", handle_ws)
     return app
 

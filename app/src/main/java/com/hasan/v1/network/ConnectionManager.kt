@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.util.Log
 import com.hasan.v1.SettingsManager
+import com.hasan.v1.capabilitiesAnnouncementJson
 import com.hasan.v1.auth.CertPinStore
 import com.hasan.v1.auth.SessionTokenStore
 import com.hasan.v1.network.models.Envelope
@@ -247,6 +248,20 @@ class ConnectionManager(
                     payload = JSONObject().apply { put("session_token", sessionToken) }
                 )
                 webSocket.send(authEnvelope.toString())
+
+                // Annonce les capabilities activées+autorisées à chaque (re)connexion — le
+                // relay les persiste par device (voir server/relay/pairing.py Session.capabilities)
+                // et plugin/hasan_delivery/tools.py les récupère dynamiquement via
+                // GET /capabilities, plutôt que de dupliquer les schémas côté Python.
+                val capsEnvelope = Envelope(
+                    channel = "system",
+                    type = "capabilities",
+                    payload = JSONObject().put(
+                        "capabilities",
+                        capabilitiesAnnouncementJson(context, settings)
+                    )
+                )
+                webSocket.send(capsEnvelope.toString())
 
                 attemptCount = 0
                 _connectionStatus.value = RelayConnectionStatus.CONNECTED
