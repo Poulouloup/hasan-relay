@@ -31,19 +31,133 @@ get_location, get_contacts)._
 
 ## Connexions (relay + hermes-webui)
 
-_À documenter : ConnectionManager (WebSocket relay), WebUiRestClient
-(hermes-webui), les deux mécanismes de session indépendants
-(SessionTokenStore / WebUiAuthStore), l'écran Réglages unifié._
+L'app maintient deux connexions serveur indépendantes, chacune avec son
+propre mécanisme de session — aucun partage d'état entre les deux :
+
+- **Relay (bridge)** — `ConnectionManager` (`network/`) tient une unique
+  connexion WebSocket persistante vers le relay server, multiplexée par
+  canal (`chat`/`bridge`/`system`/`proactive`) via `ChannelMultiplexer`.
+  Session identifiée par un `session_token` + `refresh_token` stockés dans
+  `SessionTokenStore` (`EncryptedSharedPreferences`), obtenus une fois via
+  pairing (voir section suivante). TOFU cert pinning dédié
+  (`CertPinStore`, namespace `"relay"`).
+- **Chat (hermes-webui)** — `WebUiRestClient` (`webui/`) parle en HTTP/SSE
+  classique (pas de WebSocket) à hermes-webui : login par mot de passe
+  (`POST /api/auth/login`), cookie de session stocké par `WebUiAuthStore`.
+  TOFU cert pinning séparé (`CertPinStore`, namespace `"webui"` — deux
+  serveurs distincts peuvent avoir des certificats différents même sur le
+  même VPS).
+
+Les deux sont exposées côté écran Réglages dans un seul panneau de statut
+unifié (`ConnectionStatusPanel`, `SettingsScreen.kt`), avec un bouton
+"Se connecter" qui gère les deux connexions en un seul geste
+(`SettingsFragment.connectToWebUi()` : appaire le relay si nécessaire
+avant de tenter le login webui) — mais elles restent des systèmes
+d'authentification totalement indépendants côté implémentation.
+
+### Topologie serveur
+
+Côté serveur, quatre ports distincts, généralement co-hébergés sur le
+même VPS :
+
+| Port | Service | Déploiement |
+|---|---|---|
+| 8767 | relay server (`server/relay/`) | Docker (`network_mode: host`) via `server/install-bridge.sh`, ou systemd via `server/relay/install-relay.sh` (voir DEPLOYMENT.md) |
+| 8787 | hermes-webui (chat) | projet externe, natif (venv + systemd), détecté et branché par `install-bridge.sh` |
+| 9119 | dashboard interne Hermes | natif (venv + systemd), fait partie de l'installation Hermes elle-même |
+| 443 / 8443 | Caddy (TLS) | Docker, route `:443`→8787 et `:8443` (opt-in)→9119 |
+
+Le relay et Caddy sont les deux seuls composants que ce repo installe et
+possède entièrement ; hermes-webui et le dashboard restent la
+responsabilité de l'installation Hermes de l'utilisateur, seulement
+détectés/branchés. `server/install-bridge.sh` et
+`server/Caddyfile.template` sont la source de vérité pour cette
+topologie — voir aussi
+`plugin/hasan_delivery/skills/hasan-bridge-diagnosis/SKILL.md` (skill
+Hermes de diagnostic, décrit la même topologie côté agent).
 
 ## Pairing
 
-_À documenter : format du QR (PairingManager.parseQrContent), flux
-QrScannerActivity → PairingManager → stockage EncryptedSharedPreferences._
+Le pairing est une opération ponctuelle : un code (ou son équivalent QR)
+généré côté serveur (`POST /pairing/create`, protégé par
+`RELAY_ADMIN_TOKEN` — désormais généré automatiquement par
+`install-bridge.sh`, plus besoin d'édition manuelle du fichier de service)
+échangé contre un `session_token`/`refresh_token` de longue durée.
+
+Format du QR — JSON brut, `{"relay_url", "code", "webui_url"?,
+"webui_password"?}` (les deux derniers champs optionnels, présents
+seulement si hermes-webui est branché côté serveur) :
+
+1. `QrScannerActivity` scanne le QR, extrait le texte brut.
+2. `PairingManager.parseQrContent()` parse le JSON en `QrPairingPayload`.
+3. `PairingManager.pair()` échange `(relay_url, code)` contre un
+   `session_token` via `POST /pairing/register` — un pairing manuel
+   (Réglages → Configuration manuelle) fait le même appel sans passer par
+   le QR.
+4. En cas de succès, si le QR portait aussi `webui_url`/`webui_password`,
+   `MainViewModel.pairFromQr()` enchaîne automatiquement un login
+   hermes-webui avec ces valeurs — un seul scan configure les deux
+   connexions.
+5. Le résultat (`session_token`, `refresh_token`) est persisté dans
+   `EncryptedSharedPreferences` via `SessionTokenStore` — aucune saisie
+   manuelle d'URL/token nécessaire ensuite, et le code de pairing
+   lui-même est à usage unique (consommé côté serveur dès la requête).
 
 ## Serveur relay + plugin hasan_delivery
 
-_À documenter : server/relay/ (rôle, routes principales), plugin/hasan_delivery/
-(canal de messagerie Hermes ↔ relay), voir DEPLOYMENT.md pour l'installation._
+`server/relay/` est un serveur aiohttp autonome (`server.py`) qui fait le pont
+entre l'app Android et l'agent Hermes via WebSocket (`/ws`) et quelques routes
+HTTP. Deux usages distincts côté Hermes, gérés par des mécanismes séparés :
+
+- **Messagerie** (`plugin/hasan_delivery/adapter.py`, `ctx.register_platform`) :
+  Hermes envoie des messages proactifs au téléphone (canal `chat`) et reçoit
+  les réponses de l'utilisateur (long-poll `GET /phone/replies`).
+- **Capabilities téléphone** (`plugin/hasan_delivery/tools.py`,
+  `ctx.register_tool`) : Hermes peut appeler des actions sur le téléphone
+  (SMS, batterie, localisation, etc.) via `POST /bridge/command` (canal
+  `bridge`), avec confirmation utilisateur gérée entièrement côté app
+  (`BridgeCommandHandler.kt`).
+
+### Découverte dynamique des capabilities
+
+Les schémas des capabilities (nom, description, paramètres) ne sont **pas**
+codés en dur côté Python — ils sont annoncés par l'app et récupérés
+dynamiquement par le plugin, pour éviter une 3ᵉ copie à synchroniser en plus
+de `Capability.kt` et `CapabilityExecutor.kt` :
+
+1. À chaque (re)connexion WebSocket, l'app envoie un envelope
+   `{channel: "system", type: "capabilities"}` listant les capabilities
+   activées par l'utilisateur ET dont la permission Android est accordée
+   (`ConnectionManager.kt`, `CapabilitySchema.kt::capabilitiesAnnouncementJson`).
+2. Le relay persiste cette liste par device dans `Session.capabilities`
+   (`server/relay/pairing.py`), exposée en lecture via `GET /capabilities`
+   (auth Bearer par session_token).
+3. Au démarrage du gateway Hermes, `plugin/hasan_delivery/tools.py` appelle
+   `GET /capabilities` et enregistre chaque capability comme un tool natif
+   via `ctx.register_tool()` (toolset `hasan_phone`).
+
+Conséquence pratique : ajouter une capability dans `Capability.kt` suffit,
+aucune édition de `tools.py` n'est nécessaire — seul un `hermes gateway
+restart` est requis pour que Hermes voie le changement (les tools sont
+enregistrés une seule fois, au chargement du plugin, pas de rafraîchissement
+à chaud).
+
+**Point d'implémentation important** : `tools.py` doit appeler
+`ctx.register_tool()` (méthode du `PluginContext` passé à `register(ctx)`),
+et non `tools.registry.registry.register()` directement — les deux
+enregistrent bien le tool dans le registre global (invocable dans les deux
+cas), mais seul `ctx.register_tool()` alimente aussi la liste d'attribution
+interne de Hermes (`PluginManager._plugin_tool_names`) que
+`get_plugin_toolsets()`/`hermes tools enable` utilisent pour reconnaître le
+toolset. Un appel direct au registre produit un tool fonctionnel mais un
+toolset invisible ("Unknown toolset") pour tout ce qui passe par cette liste.
+
+Ce mécanisme remplace un ancien serveur MCP externe
+(`~/.hermes/phone-relay-mcp/server.js`, Node.js, désormais retiré) qui
+exposait les mêmes capabilities via le protocole MCP plutôt que le registre
+natif de Hermes — voir CHANGELOG.md pour le contexte de cette migration.
+
+Voir DEPLOYMENT.md pour l'installation du relay et du plugin.
 
 ## Kanban
 

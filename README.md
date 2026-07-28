@@ -78,6 +78,7 @@ Pairing with the relay is done once via QR code (`QrScannerActivity` → `Pairin
 - **Light Mode** — full-screen hands-free interface with large mic button, TTS mute, and wake word listening
 - **TOFU certificate verification** — Trust On First Use for the relay's self-signed HTTPS/WSS
 - **No external account** — no API key, no subscription required
+- **One-command server deployment** — `server/install-bridge.sh` provisions the relay and Caddy TLS termination (Docker Compose) plus the Hermes plugin in a single interactive run
 
 ---
 
@@ -166,6 +167,7 @@ hasanv1/
 | Kanban board (read + move cards + create boards) | ✅ |
 | Session files (browse + download workspace) | ✅ |
 | Light Mode (full-screen hands-free) | ✅ |
+| One-command bridge deployment (relay + Caddy + plugin, Docker Compose) | ✅ |
 | Offline local STT (Whisper ONNX) | 🔜 V2 |
 | High-quality TTS (Piper) | 🔜 V2 |
 
