@@ -103,11 +103,11 @@ class SettingsCallbacks(
     val onScanQrPairing: () -> Unit,
     val onRelayManualUrlChange: (String) -> Unit,
     val onRelayManualCodeChange: (String) -> Unit,
-    val onPairManually: () -> Unit,
     val onDismissRelayError: () -> Unit,
     val onRelayToggle: (Boolean) -> Unit,
-    val onDisconnectRelay: () -> Unit,
     val onDisconnectWebUi: () -> Unit,
+    /** Intercepte l'édition d'un champ secret (mot de passe webui, code pairing) — authentification biométrique avant [onSuccess]. */
+    val onAuthRequiredForSecretEdit: (onSuccess: () -> Unit) -> Unit,
     val onTtsProviderChange: (String) -> Unit,
     val onTtsSubOptionChange: (String) -> Unit,
     val onNativeEngineChange: (String) -> Unit,
@@ -245,6 +245,10 @@ private fun EditPencilButton(onClick: () -> Unit, modifier: Modifier = Modifier)
 /**
  * Ligne éditable : affiche la valeur + crayon en mode lecture, bascule vers un OutlinedTextField
  * compact inline au clic sur le crayon. État d'édition purement local (pas de champ UiState).
+ *
+ * [onAuthRequiredForEdit] optionnel : si fourni, le clic sur le crayon lui délègue le passage en
+ * édition (authentification biométrique côté Fragment) au lieu de l'appliquer directement — utilisé
+ * pour les champs secrets (mot de passe webui, code de pairing).
  */
 @Composable
 private fun SettingsEditableRow(
@@ -254,7 +258,8 @@ private fun SettingsEditableRow(
     modifier: Modifier = Modifier,
     showDivider: Boolean = true,
     placeholder: String = "",
-    isSecret: Boolean = false
+    isSecret: Boolean = false,
+    onAuthRequiredForEdit: ((onSuccess: () -> Unit) -> Unit)? = null
 ) {
     var editing by remember { mutableStateOf(false) }
     var draft by remember(value) { mutableStateOf(value) }
@@ -338,7 +343,9 @@ private fun SettingsEditableRow(
                     maxLines = 1
                 )
                 Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
-                EditPencilButton(onClick = { editing = true })
+                EditPencilButton(onClick = {
+                    if (onAuthRequiredForEdit != null) onAuthRequiredForEdit { editing = true } else editing = true
+                })
             }
         }
         if (showDivider) {
@@ -649,7 +656,8 @@ private fun ManualConnectionAccordion(state: SettingsUiState, callbacks: Setting
                             onValueChange = callbacks.onWebUiPasswordChange,
                             placeholder = "mot de passe",
                             isSecret = true,
-                            showDivider = false
+                            showDivider = false,
+                            onAuthRequiredForEdit = callbacks.onAuthRequiredForSecretEdit
                         )
                     }
 
@@ -675,24 +683,17 @@ private fun ManualConnectionAccordion(state: SettingsUiState, callbacks: Setting
                             value = state.relayManualCode,
                             onValueChange = callbacks.onRelayManualCodeChange,
                             placeholder = "ABC123",
-                            showDivider = false
+                            isSecret = true,
+                            showDivider = false,
+                            onAuthRequiredForEdit = callbacks.onAuthRequiredForSecretEdit
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(HasanDimens.SpacingM))
-
-                    CutCornerOutlineButton(
-                        text = "Appairer manuellement",
-                        onClick = callbacks.onPairManually
+                    Text(
+                        text = "Le bouton \"Se connecter\" ci-dessus appaire le relay et connecte le chat en un seul geste.",
+                        color = HasanColors.TextMutedA11y,
+                        fontSize = HasanDimens.TextCaption,
+                        modifier = Modifier.padding(top = HasanDimens.SpacingS, start = HasanDimens.SpacingXs)
                     )
-
-                    if (state.relayPaired) {
-                        Spacer(modifier = Modifier.height(HasanDimens.SpacingS))
-                        CutCornerOutlineButton(
-                            text = "Déconnecter le relay (dépairing)",
-                            onClick = callbacks.onDisconnectRelay
-                        )
-                    }
                 }
             }
         }

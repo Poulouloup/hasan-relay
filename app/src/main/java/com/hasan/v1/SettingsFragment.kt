@@ -139,15 +139,10 @@ class SettingsFragment : Fragment() {
                             onScanQrPairing = { (activity as? MainActivity)?.scanQrForPairing() },
                             onRelayManualUrlChange = { url -> relayManualUrlState = url },
                             onRelayManualCodeChange = { code -> relayManualCodeState = code },
-                            onPairManually = {
-                                if (relayManualUrlState.isNotBlank() && relayManualCodeState.isNotBlank()) {
-                                    viewModel.pairManually(relayManualUrlState.trim(), relayManualCodeState.trim())
-                                }
-                            },
                             onDismissRelayError = { viewModel.clearError() },
                             onRelayToggle = { enabled -> onRelayToggle(enabled) },
-                            onDisconnectRelay = { viewModel.disconnectRelayCompletely() },
                             onDisconnectWebUi = { viewModel.disconnectWebUi() },
+                            onAuthRequiredForSecretEdit = { onSuccess -> requestSecretEditAuth(onSuccess) },
                             onTtsProviderChange = { provider ->
                                 ttsProviderState = provider
                                 viewModel.changeTtsProvider(provider)
@@ -347,8 +342,20 @@ class SettingsFragment : Fragment() {
      * relay) ; seul le mot de passe transite ici, jamais persisté par
      * SettingsManager (voir WebUiRestClient.login — seul le cookie de
      * session résultant est stocké).
+     *
+     * Gère aussi le pairing du relay depuis les mêmes champs de la config
+     * manuelle (URL + code) si le relay n'est pas déjà appairé — un seul
+     * bouton "Se connecter" pour les deux connexions, plus besoin du bouton
+     * "Appairer manuellement" séparé (retiré de l'accordéon). Les deux
+     * connexions sont indépendantes (systèmes distincts, pas de dépendance
+     * d'ordre) : le pairing relay ne bloque jamais la tentative webui, et
+     * inversement.
      */
     private fun connectToWebUi() {
+        if (!relayPairedState && relayManualUrlState.isNotBlank() && relayManualCodeState.isNotBlank()) {
+            viewModel.pairManually(relayManualUrlState.trim(), relayManualCodeState.trim())
+        }
+
         val password = webUiPasswordState
         if (settings.webUiServerUrl.isBlank() || password.isBlank()) {
             webUiConnectionStatusState = ConnectionStatusUi(ok = false, message = "URL et mot de passe requis")
@@ -396,6 +403,23 @@ class SettingsFragment : Fragment() {
             )
             if (ok) viewModel.confirmRelayEnable()
             // Sinon : rien à faire, relayEnabledState reste à false (jamais mis à jour côté ViewModel).
+        }
+    }
+
+    /**
+     * Protège l'édition des champs secrets de la config manuelle (mot de passe
+     * webui, code de pairing) — valeurs jusqu'ici visibles en clair au clic du
+     * crayon. Même authentification que le switch relay ; [onSuccess] fait
+     * passer le champ en mode édition côté Compose.
+     */
+    private fun requestSecretEditAuth(onSuccess: () -> Unit) {
+        lifecycleScope.launch {
+            val ok = com.hasan.v1.auth.BiometricAuthHelper.authenticate(
+                activity = requireActivity() as MainActivity,
+                title = "Modifier une valeur sensible",
+                subtitle = "Mot de passe ou code de pairing"
+            )
+            if (ok) onSuccess()
         }
     }
 
