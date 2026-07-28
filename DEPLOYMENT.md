@@ -15,10 +15,12 @@ If you're a developer building the Android app from source instead, see
                         (installed inside Hermes)
 ```
 
-Two components run on your server:
+Three things run on your server:
 1. **The relay server** (`server/relay/`) — a small Python/aiohttp process
    that holds the WebSocket connection to the phone and bridges it to Hermes.
-2. **The `hasan_delivery` plugin** — installed inside your existing Hermes
+2. **Caddy** — TLS termination in front of the relay and (if present)
+   hermes-webui, since the relay itself speaks plain WebSocket/HTTP.
+3. **The `hasan_delivery` plugin** — installed inside your existing Hermes
    installation, talks to the relay over plain HTTP (both on the same
    machine/localhost in the common case).
 
@@ -26,11 +28,74 @@ The Android app itself is installed separately on the phone (build it from
 source per [SETUP.md](SETUP.md), or install a released APK if one is
 provided).
 
-## 1 — Deploy the relay server
+## Quick start (recommended)
 
 ```bash
 git clone https://github.com/Poulouloup/hasan-mobile-relay.git
 cd hasan-mobile-relay
+sudo ./server/install-bridge.sh
+```
+
+One command, run once. It:
+- Installs Docker if not already present (official `get.docker.com` script).
+- Asks a few questions (your server's public IP/hostname, whether
+  hermes-webui is already running here and its password if so, whether to
+  expose Hermes's internal dashboard, `HERMES_HOME`).
+- Generates `RELAY_ADMIN_TOKEN` and all the other secrets/config for you
+  (nothing to hand-edit afterward).
+- Starts the relay and Caddy as Docker containers (`network_mode: host` —
+  no bridge network, no port-mapping/NAT to reason about; they talk to
+  `127.0.0.1`-bound peers like hermes-webui exactly as native processes
+  would).
+- Installs the `hasan_delivery` plugin into your existing Hermes venv (this
+  part stays outside Docker — it runs inside the Hermes gateway process
+  you already have, not a new standalone service).
+- Installs a diagnostic-only skill for Hermes Agent
+  (`plugin/hasan_delivery/skills/hasan-bridge-diagnosis/`) describing the
+  four-port topology and a known Caddy-config pitfall, so a future
+  diagnosis (yours or the agent's) doesn't have to rediscover it.
+- Prints a ready-to-scan pairing code JSON at the end.
+
+Safe to re-run — it detects an existing deployment and updates it in
+place. It also refuses to silently overwrite a Caddy config it doesn't
+recognize (checked via a marker comment) — pass `--force` only if you're
+sure you want to replace it.
+
+### Caddy topology
+
+One Caddy instance serves two separate needs on two separate public ports
+(there's no domain on a bare IP, so no subdomain/path routing is possible):
+
+| Public port | Routes to | What |
+|---|---|---|
+| `:443` | `127.0.0.1:8787` | hermes-webui (chat), if detected |
+| `:8443` (opt-in) | `127.0.0.1:9119` | Hermes's internal dashboard |
+
+Caddy uses its own self-signed local CA (`tls internal`) — consistent
+with the app's TOFU certificate pinning, and there's no domain here for
+ACME anyway. The rendered `server/Caddyfile` sets `default_sni` explicitly
+because Android/OkHttp doesn't send SNI for a literal IP address (RFC
+6066) — without it, the TLS handshake fails.
+
+**A known pitfall**: it's possible to end up with two different Caddy
+processes (one containerized, one native) both trying to claim the same
+public port, with diverging configs — this happened once during this
+project's own development and cost hours of confusing debugging (401s
+that looked like a credentials problem but were actually requests hitting
+the wrong backend). `install-bridge.sh` checks for a port conflict before
+starting containers. See
+`plugin/hasan_delivery/skills/hasan-bridge-diagnosis/SKILL.md` for the
+full diagnostic writeup, including which Caddy config is canonical for
+which purpose.
+
+## Manual / non-Docker path (advanced, or what the script does under the hood)
+
+Prefer this if you don't want Docker on this host, or need a Caddy setup
+different from what the script provisions.
+
+### 1 — Deploy the relay server
+
+```bash
 sudo ./server/relay/install-relay.sh
 ```
 
@@ -60,7 +125,7 @@ curl https://relay.example.com/health
 curl https://relay.example.com/version
 ```
 
-## 2 — Install the `hasan_delivery` plugin
+### 2 — Install the `hasan_delivery` plugin
 
 On the same server (or wherever your Hermes gateway process runs):
 
@@ -79,7 +144,7 @@ hermes gateway restart
 Full detail, including how to verify it connected: see
 [`plugin/hasan_delivery/README.md`](plugin/hasan_delivery/README.md).
 
-## 3 — Pair the phone
+### 3 — Pair the phone
 
 The relay identifies a paired device by a session token, obtained once via a
 QR code scanned from the app.
@@ -120,7 +185,7 @@ QR code scanned from the app.
 Pairing codes expire after `ttl_seconds` (10 minutes) — regenerate one if it
 expires before you scan it.
 
-## 4 — Verify everything works
+### 4 — Verify everything works
 
 - Relay: `curl https://relay.example.com/health` and `/version`.
 - Plugin: `journalctl --user -u hermes-gateway.service -f | grep -i hasan_delivery`
