@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,6 +30,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenu
@@ -280,20 +283,31 @@ private fun ApprovalOverlay(approval: ChatApprovalUi, onResponse: (String, com.h
                 fontSize = HasanDimens.TextDisplaySmall
             )
             Spacer(modifier = Modifier.height(HasanDimens.SpacingS))
-            Text(
-                text = approval.command,
-                color = HasanColors.TextSecondary,
-                fontFamily = IBMPlexMono,
-                fontSize = HasanDimens.TextBodyMedium
-            )
-            if (approval.description.isNotBlank()) {
-                Spacer(modifier = Modifier.height(HasanDimens.SpacingXs))
+            // Hauteur bornée + scroll plutôt qu'un Text libre : une commande VPS longue
+            // (script multi-lignes, sortie de commande risquée...) pouvait pousser les 4
+            // boutons Une fois/Session/Toujours/Refuser hors de l'écran sans moyen de les
+            // atteindre — la Column parente n'a pas de contrainte de hauteur/scroll.
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 320.dp)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Text(
-                    text = approval.description,
-                    color = HasanColors.TextMutedA11y,
-                    fontFamily = IBMPlexSans,
-                    fontSize = HasanDimens.TextCaption
+                    text = approval.command,
+                    color = HasanColors.TextSecondary,
+                    fontFamily = IBMPlexMono,
+                    fontSize = HasanDimens.TextBodyMedium
                 )
+                if (approval.description.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(HasanDimens.SpacingXs))
+                    Text(
+                        text = approval.description,
+                        color = HasanColors.TextMutedA11y,
+                        fontFamily = IBMPlexSans,
+                        fontSize = HasanDimens.TextCaption
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(HasanDimens.SpacingL))
             CutCornerOutlineButton(

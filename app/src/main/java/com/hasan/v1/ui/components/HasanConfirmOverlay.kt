@@ -6,9 +6,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -61,11 +65,19 @@ fun HasanConfirmOverlay(
                 )
                 Spacer(modifier = Modifier.height(HasanDimens.SpacingS))
             }
+            // Hauteur bornée + scroll plutôt qu'un Text libre : un message long (commande
+            // bash multi-lignes, sortie de commande risquée sur le VPS...) pouvait pousser
+            // les boutons Confirmer/Annuler hors de l'écran sans aucun moyen de les
+            // atteindre — le Column parent n'a pas de contrainte de hauteur/scroll.
             Text(
                 text = message,
                 color = HasanColors.TextSecondary,
                 fontFamily = IBMPlexSans,
-                fontSize = HasanDimens.TextBodyMedium
+                fontSize = HasanDimens.TextBodyMedium,
+                modifier = Modifier
+                    .heightIn(max = 320.dp)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
             )
             Spacer(modifier = Modifier.height(HasanDimens.SpacingL))
             CutCornerOutlineButton(
