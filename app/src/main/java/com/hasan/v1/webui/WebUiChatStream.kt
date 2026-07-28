@@ -145,7 +145,10 @@ class WebUiChatStream(private val restClient: WebUiRestClient) {
                         durationMs = if (obj.isNull("duration")) null else obj.optDouble("duration").takeIf { !it.isNaN() }
                     )
                 }
-                "done" -> WebUiStreamEvent.Done(JSONObject(data).optJSONObject("session"))
+                "done" -> {
+                    val obj = JSONObject(data)
+                    WebUiStreamEvent.Done(obj.optJSONObject("session"), obj.optJSONObject("usage"))
+                }
                 "apperror" -> {
                     val obj = JSONObject(data)
                     // Payload construit par _provider_error_payload (api/streaming.py) :

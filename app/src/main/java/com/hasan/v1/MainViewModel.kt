@@ -932,8 +932,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         // transport — le contexte est porté par session_id uniquement,
                         // confirmé côté hermes-webui : POST /api/chat/start {session_id,
                         // message} sans previous_response_id).
-                        val inputTokens = event.sessionRaw?.optInt("input_tokens", 0) ?: 0
-                        val outputTokens = event.sessionRaw?.optInt("output_tokens", 0) ?: 0
+                        val inputTokens = event.usageRaw?.optInt("input_tokens", 0) ?: 0
+                        val outputTokens = event.usageRaw?.optInt("output_tokens", 0) ?: 0
                         val metadata = if (inputTokens > 0 || outputTokens > 0) {
                             """{"input_tokens":$inputTokens,"output_tokens":$outputTokens,"duration_ms":$durationMs}"""
                         } else null

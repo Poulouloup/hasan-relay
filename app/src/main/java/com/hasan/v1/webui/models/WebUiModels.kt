@@ -41,8 +41,15 @@ sealed class WebUiStreamEvent {
         val isError: Boolean,
         val durationMs: Double?
     ) : WebUiStreamEvent()
-    /** event: done — fin de run réussie. [sessionRaw] est le JSON session complet, laissé brut pour que l'appelant extraie ce dont il a besoin. */
-    data class Done(val sessionRaw: org.json.JSONObject?) : WebUiStreamEvent()
+    /**
+     * event: done — fin de run réussie. [sessionRaw] est le JSON session complet, laissé brut
+     * pour que l'appelant extraie ce dont il a besoin. [usageRaw] est un objet FRÈRE de
+     * "session" dans le payload serveur (api/streaming.py: {'session': ..., 'usage': {
+     * 'input_tokens', 'output_tokens'}}), pas un enfant de session — les tokens n'ont jamais
+     * été dans sessionRaw malgré ce que le code appelant supposait (durée/tokens absents de
+     * l'UI jusqu'au fix de ce bug).
+     */
+    data class Done(val sessionRaw: org.json.JSONObject?, val usageRaw: org.json.JSONObject?) : WebUiStreamEvent()
     /**
      * event: apperror — l'agent a levé une exception applicative côté
      * serveur. C'est le VRAI nom d'event émis par le serveur (vérifié dans

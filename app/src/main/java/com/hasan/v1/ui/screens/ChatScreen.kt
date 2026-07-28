@@ -603,11 +603,10 @@ private fun buildMetadataText(metadata: String?): String? {
         val obj = JSONObject(metadata)
         val durationMs = obj.optLong("duration_ms", -1L)
         val outputTokens = obj.optInt("output_tokens", 0)
-        if (durationMs < 0 && outputTokens == 0) return null
         val parts = mutableListOf<String>()
         if (durationMs >= 0) parts.add("${"%.1f".format(durationMs / 1000.0)}s")
         if (outputTokens > 0) parts.add("$outputTokens tok")
-        parts.joinToString(" · ")
+        parts.joinToString(" · ").ifBlank { null }
     } catch (_: Exception) { null }
 }
 
