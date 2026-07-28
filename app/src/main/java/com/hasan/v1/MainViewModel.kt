@@ -1,10 +1,13 @@
 ﻿package com.hasan.v1
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hasan.v1.audio.BargeInListener
@@ -596,8 +599,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateState { copy(ttsStatus = TtsStatus.IDLE, ttsPlayingMessageId = null) }
     }
 
+    /**
+     * true si RECORD_AUDIO est accordée — condition requise avant tout envoi d'intent au
+     * service wake word. Si le service n'est plus vivant (crash précédent, jamais démarré
+     * faute de permission), Android relance onCreate() pour traiter l'intent, qui appelle
+     * startForeground(FOREGROUND_SERVICE_TYPE_MICROPHONE) : sans RECORD_AUDIO, targetSdk 35
+     * lève une SecurityException fatale non rattrapable depuis l'appelant (observé en crash
+     * direct en changeant le modèle/la sensibilité du wake word sans la permission accordée).
+     */
+    private fun hasRecordAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
     fun swapWakeWordModel(modelPath: String) {
         settings.wakeWordModel = modelPath
+        if (!hasRecordAudioPermission()) return
         getApplication<Application>().startService(
             Intent(getApplication(), HassanWakeWordService::class.java).apply {
                 action = HassanWakeWordService.ACTION_SWAP_MODEL
@@ -611,6 +627,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setWakeWordSensitivity(value: Float) {
         if (settings.wakeWordSensitivity == value) return
         settings.wakeWordSensitivity = value
+        if (!hasRecordAudioPermission()) return
         // Recrée l'engine côté service (hot-swap, cf swapWakeWordModel) — WakeWordModel.threshold
         // est immuable, pas de setter en cours de route côté lib openwakeword.
         getApplication<Application>().startService(
@@ -1170,6 +1187,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendWakeWordIntent(action: String) {
+        // Le service n'est peut-être plus vivant (tué par l'OS, crash précédent) : n'importe
+        // quel startService() ici peut déclencher onCreate() → startForeground(MICROPHONE),
+        // donc le même garde-fou que swapWakeWordModel/setWakeWordSensitivity s'applique.
+        if (!hasRecordAudioPermission()) return
         getApplication<Application>().startService(
             Intent(getApplication(), HassanWakeWordService::class.java).apply {
                 this.action = action

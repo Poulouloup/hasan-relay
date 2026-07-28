@@ -26,6 +26,7 @@ import com.hasan.v1.ui.screens.SettingsScreen
 import com.hasan.v1.ui.screens.SettingsUiState
 import com.hasan.v1.ui.screens.TtsEngineOption
 import com.hasan.v1.ui.theme.HasanTheme
+import com.hasan.v1.utils.BatteryOptimizationUtils
 import com.hasan.v1.utils.HasanDialog
 import kotlinx.coroutines.launch
 
@@ -66,6 +67,7 @@ class SettingsFragment : Fragment() {
     private var wakeWordEnabledState by mutableStateOf(SettingsManager.DEFAULT_WAKE_ENABLED)
     private var wakeWordSensitivityState by mutableStateOf(SettingsManager.DEFAULT_SENSITIVITY)
     private var wakeWordModelState by mutableStateOf(SettingsManager.DEFAULT_WAKE_WORD_MODEL)
+    private var batteryOptimizationIgnoredState by mutableStateOf(false)
 
     private var hermesProfilesState by mutableStateOf<List<HermesProfile>>(emptyList())
     private var mcpServersState by mutableStateOf<List<McpServer>>(emptyList())
@@ -119,6 +121,7 @@ class SettingsFragment : Fragment() {
                             wakeWordSensitivity = wakeWordSensitivityState,
                             wakeWordModels = SettingsManager.WAKE_WORD_MODELS,
                             wakeWordSelectedModel = wakeWordModelState,
+                            batteryOptimizationIgnored = batteryOptimizationIgnoredState,
                             hermesProfiles = hermesProfilesState,
                             mcpServers = mcpServersState,
                             webUiServerUrl = webUiServerUrlState,
@@ -178,6 +181,9 @@ class SettingsFragment : Fragment() {
                                 wakeWordModelState = modelPath
                                 viewModel.swapWakeWordModel(modelPath)
                             },
+                            onRequestBatteryExemption = {
+                                startActivity(BatteryOptimizationUtils.buildRequestExemptionIntent(requireContext()))
+                            },
                             onProfileSelect = { profileName -> switchHermesProfile(profileName) },
                             onMcpToggle = { name, enabled -> toggleMcpServer(name, enabled) },
                             onWebUiServerUrlChange = { url ->
@@ -197,10 +203,18 @@ class SettingsFragment : Fragment() {
 
     // ─────────────────────────── Chargement des valeurs ───────────────────
 
+    override fun onResume() {
+        super.onResume()
+        // Rafraîchit l'état batterie au retour d'un intent système (exemption accordée/refusée)
+        // ou d'un aller-retour manuel dans les paramètres Android.
+        batteryOptimizationIgnoredState = BatteryOptimizationUtils.isIgnoringBatteryOptimizations(requireContext())
+    }
+
     private fun loadCurrentValues() {
         wakeWordEnabledState = settings.wakeWordEnabled
         wakeWordSensitivityState = settings.wakeWordSensitivity
         wakeWordModelState = settings.wakeWordModel
+        batteryOptimizationIgnoredState = BatteryOptimizationUtils.isIgnoringBatteryOptimizations(requireContext())
 
         ttsEnabledState = settings.ttsEnabled
         ttsVolumeState = settings.ttsVolume

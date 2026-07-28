@@ -121,7 +121,9 @@
     <string name="onboarding_wakeword_activate">Activer le wake word</string>
     <string name="onboarding_wakeword_granted">Wake word activé</string>
     <string name="onboarding_wakeword_denied">Permission refusée — activez le micro dans les paramètres système</string>
-    <string name="onboarding_huawei_note">Sur Huawei, désactivez l\'optimisation batterie pour Hasan dans Paramètres → Batterie</string>
+    <string name="onboarding_battery_activate">Autoriser l\'écoute en arrière-plan</string>
+    <string name="onboarding_battery_granted">Écoute en arrière-plan autorisée</string>
+    <string name="onboarding_battery_note">Sans cette autorisation, certains téléphones (Xiaomi, Huawei, Samsung, OnePlus…) coupent le wake word en arrière-plan au bout de quelques minutes.</string>
     <string name="onboarding_ready_title">Hasan est prêt !</string>
     <string name="onboarding_ready_subtitle">Dites \'Ok Hasan\' pour commencer</string>
 

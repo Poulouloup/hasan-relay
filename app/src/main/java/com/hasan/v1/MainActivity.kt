@@ -119,16 +119,27 @@ class MainActivity : AppCompatActivity() {
         setupFragments(savedInstanceState)
         setupDrawerRoot()
 
-        // Démarre le service wake word si activé dans les préférences
-        if (viewModel.settings.wakeWordEnabled) {
+        // Démarre le service wake word si activé dans les préférences ET si RECORD_AUDIO
+        // est réellement accordée — les deux sont découplés (préférence utilisateur vs état
+        // système), et targetSdk 35 lève une SecurityException NON rattrapable par ce
+        // try/catch : startForegroundService() est asynchrone, l'exception survient plus tard
+        // dans HassanWakeWordService.onCreate() (Service.startForeground() avec
+        // FOREGROUND_SERVICE_TYPE_MICROPHONE sans RECORD_AUDIO), sur un thread hors de portée
+        // de ce bloc — observé en crash direct au démarrage après une réinstallation où la
+        // permission n'avait pas encore été (re)accordée.
+        val hasRecordAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (viewModel.settings.wakeWordEnabled && hasRecordAudio) {
             try {
                 startForegroundService(Intent(this, HassanWakeWordService::class.java))
             } catch (e: Exception) {
-                // ForegroundServiceStartNotAllowedException (API 31+) ou SecurityException —
-                // le système peut refuser le démarrage (app en arrière-plan, restrictions
-                // batterie, etc.) ; ne doit jamais faire planter onCreate().
+                // ForegroundServiceStartNotAllowedException (API 31+) — le système peut
+                // encore refuser le démarrage pour d'autres raisons (app en arrière-plan,
+                // restrictions batterie, etc.) ; ne doit jamais faire planter onCreate().
                 android.util.Log.w("MainActivity", "Démarrage du service wake word refusé par le système", e)
             }
+        } else if (viewModel.settings.wakeWordEnabled) {
+            android.util.Log.w("MainActivity", "Wake word activé mais RECORD_AUDIO non accordée — service non démarré")
         }
 
         requestNotifPermissionIfNeeded()

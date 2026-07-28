@@ -83,6 +83,7 @@ data class SettingsUiState(
     val wakeWordSensitivity: Float,
     val wakeWordModels: List<String>,
     val wakeWordSelectedModel: String,
+    val batteryOptimizationIgnored: Boolean,
     val hermesProfiles: List<com.hasan.v1.webui.models.HermesProfile>,
     val mcpServers: List<com.hasan.v1.webui.models.McpServer>,
     val webUiServerUrl: String,
@@ -116,6 +117,7 @@ class SettingsCallbacks(
     val onWakeWordEnabledChange: (Boolean) -> Unit,
     val onWakeWordSensitivityChange: (Float) -> Unit,
     val onWakeWordModelChange: (String) -> Unit,
+    val onRequestBatteryExemption: () -> Unit,
     val onProfileSelect: (String) -> Unit,
     val onMcpToggle: (String, Boolean) -> Unit,
     val onWebUiServerUrlChange: (String) -> Unit,
@@ -986,6 +988,35 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
             selected = state.wakeWordSelectedModel,
             onSelect = callbacks.onWakeWordModelChange
         )
+
+        Divider()
+
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Écoute en arrière-plan",
+                color = HasanColors.TextPrimary,
+                fontSize = HasanDimens.TextBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = if (state.batteryOptimizationIgnored) "Autorisée" else "Non autorisée",
+                color = if (state.batteryOptimizationIgnored) HasanColors.Accent else HasanColors.TextSecondary,
+                fontFamily = IBMPlexMono,
+                fontSize = HasanDimens.TextSubtitle
+            )
+        }
+        if (!state.batteryOptimizationIgnored) {
+            Text(
+                text = "Certains téléphones (Xiaomi, Huawei, Samsung, OnePlus…) coupent le wake word en arrière-plan sans cette autorisation.",
+                color = HasanColors.TextSecondary,
+                fontSize = HasanDimens.TextLabelMedium,
+                modifier = Modifier.padding(top = 4.dp, bottom = HasanDimens.SpacingS)
+            )
+            CutCornerOutlineButton(
+                text = "Autoriser l'écoute en arrière-plan",
+                onClick = callbacks.onRequestBatteryExemption
+            )
+        }
     }
 }
 

@@ -14,6 +14,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Maintient le CPU actif quand l'écran est éteint (écoute wake word) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Demande d'exemption de l'optimisation batterie — sans elle, MIUI/EMUI/ColorOS/
+         OneUI tuent le service wake word en arrière-plan en quelques minutes -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Vibration haptique (pipeline vocal) -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Capabilities orchestrateur MCP -->

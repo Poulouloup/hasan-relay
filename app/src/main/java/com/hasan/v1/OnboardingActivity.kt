@@ -17,6 +17,7 @@ import androidx.fragment.app.Fragment
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import com.google.android.material.button.MaterialButton
 import com.hasan.v1.databinding.ActivityOnboardingBinding
+import com.hasan.v1.utils.BatteryOptimizationUtils
 
 /**
  * Onboarding premier lancement — 3 écrans swipables via ViewPager2.
@@ -130,13 +131,23 @@ class OnboardingActivity : AppCompatActivity() {
     // ─────────────────────────── Page 2 — Wake word ──────────────────────────
 
     class WakeWordPage : Fragment() {
+        private lateinit var container: LinearLayout
+        private var btnBattery: MaterialButton? = null
+
         private val requestPermission = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
             view?.findViewById<TextView>(R.id.tvPageDescription)?.text =
                 if (granted) getString(R.string.onboarding_wakeword_granted)
                 else getString(R.string.onboarding_wakeword_denied)
+            if (granted) addBatteryButtonIfNeeded()
         }
+
+        // Pas de callback fiable pour ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (l'utilisateur
+        // peut annuler sans résultat exploitable) — on relit l'état système au retour sur la page.
+        private val requestBatteryExemption = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { refreshBatteryButton() }
 
         override fun onCreateView(inflater: LayoutInflater, c: ViewGroup?, s: Bundle?): View =
             inflater.inflate(R.layout.fragment_onboarding_page, c, false)
@@ -149,7 +160,7 @@ class OnboardingActivity : AppCompatActivity() {
             view.findViewById<TextView>(R.id.tvPageDescription).text =
                 getString(R.string.onboarding_wakeword_desc)
 
-            val container = view.findViewById<LinearLayout>(R.id.actionContainer)
+            container = view.findViewById(R.id.actionContainer)
             val ctx = requireContext()
 
             val alreadyGranted = ContextCompat.checkSelfPermission(
@@ -159,6 +170,7 @@ class OnboardingActivity : AppCompatActivity() {
             if (alreadyGranted) {
                 view.findViewById<TextView>(R.id.tvPageDescription).text =
                     getString(R.string.onboarding_wakeword_granted)
+                addBatteryButtonIfNeeded()
                 return
             }
 
@@ -175,16 +187,52 @@ class OnboardingActivity : AppCompatActivity() {
             btnActivate.setOnClickListener {
                 requestPermission.launch(Manifest.permission.RECORD_AUDIO)
             }
+        }
 
-            // Note Huawei
-            val tvHuawei = TextView(ctx).apply {
-                text = getString(R.string.onboarding_huawei_note)
+        /** Ajoute (une seule fois) le bouton d'exemption batterie, seulement s'il est encore utile. */
+        private fun addBatteryButtonIfNeeded() {
+            if (btnBattery != null) {
+                refreshBatteryButton()
+                return
+            }
+            val ctx = requireContext()
+            if (BatteryOptimizationUtils.isIgnoringBatteryOptimizations(ctx)) return
+
+            val btn = MaterialButton(ctx).apply {
+                text = getString(R.string.onboarding_battery_activate)
+                setTextColor(ContextCompat.getColor(ctx, R.color.hasan_text_primary))
+                backgroundTintList = android.content.res.ColorStateList.valueOf(
+                    ContextCompat.getColor(ctx, R.color.hasan_bg_card)
+                )
+                strokeColor = android.content.res.ColorStateList.valueOf(
+                    ContextCompat.getColor(ctx, R.color.hasan_accent)
+                )
+                strokeWidth = 2
+                cornerRadius = 56
+                setPadding(0, 32, 0, 0)
+            }
+            btn.setOnClickListener {
+                requestBatteryExemption.launch(BatteryOptimizationUtils.buildRequestExemptionIntent(ctx))
+            }
+            container.addView(btn)
+            btnBattery = btn
+
+            val tvNote = TextView(ctx).apply {
+                text = getString(R.string.onboarding_battery_note)
                 textSize = 12f
                 setTextColor(ContextCompat.getColor(ctx, R.color.hasan_text_hint))
                 gravity = android.view.Gravity.CENTER
-                setPadding(0, 32, 0, 0)
+                setPadding(0, 16, 0, 0)
             }
-            container.addView(tvHuawei)
+            container.addView(tvNote)
+        }
+
+        private fun refreshBatteryButton() {
+            val btn = btnBattery ?: return
+            if (BatteryOptimizationUtils.isIgnoringBatteryOptimizations(requireContext())) {
+                btn.text = getString(R.string.onboarding_battery_granted)
+                btn.isEnabled = false
+            }
         }
     }
 
