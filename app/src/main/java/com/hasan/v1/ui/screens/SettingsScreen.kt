@@ -70,6 +70,7 @@ data class SettingsUiState(
     val relayManualUrl: String,
     val relayManualCode: String,
     val relayErrorMessage: String?,
+    val relayDeviceLabel: String,
     val ttsProvider: String,
     val ttsProviderSubOptions: List<Pair<String, String>>,
     val ttsSelectedSubOption: String,
@@ -103,6 +104,7 @@ class SettingsCallbacks(
     val onScanQrPairing: () -> Unit,
     val onRelayManualUrlChange: (String) -> Unit,
     val onRelayManualCodeChange: (String) -> Unit,
+    val onRelayDeviceLabelChange: (String) -> Unit,
     val onDismissRelayError: () -> Unit,
     val onRelayToggle: (Boolean) -> Unit,
     val onDisconnectWebUi: () -> Unit,
@@ -684,10 +686,22 @@ private fun ManualConnectionAccordion(state: SettingsUiState, callbacks: Setting
                             onValueChange = callbacks.onRelayManualCodeChange,
                             placeholder = "ABC123",
                             isSecret = true,
-                            showDivider = false,
                             onAuthRequiredForEdit = callbacks.onAuthRequiredForSecretEdit
                         )
+                        SettingsEditableRow(
+                            label = "Nom de cet appareil",
+                            value = state.relayDeviceLabel,
+                            onValueChange = callbacks.onRelayDeviceLabelChange,
+                            placeholder = "Téléphone de Loup",
+                            showDivider = false
+                        )
                     }
+                    Text(
+                        text = "Le nom de l'appareil permet à Hermes de le distinguer quand plusieurs appareils (téléphone, Hasan Desktop…) sont connectés en même temps.",
+                        color = HasanColors.TextMutedA11y,
+                        fontSize = HasanDimens.TextCaption,
+                        modifier = Modifier.padding(top = HasanDimens.SpacingXs, start = HasanDimens.SpacingXs)
+                    )
                     Text(
                         text = "Le bouton \"Se connecter\" ci-dessus appaire le relay et connecte le chat en un seul geste.",
                         color = HasanColors.TextMutedA11y,

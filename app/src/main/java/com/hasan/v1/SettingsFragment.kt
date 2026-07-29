@@ -85,6 +85,7 @@ class SettingsFragment : Fragment() {
     private var relayManualUrlState by mutableStateOf("")
     private var relayManualCodeState by mutableStateOf("")
     private var relayErrorMessageState by mutableStateOf<String?>(null)
+    private var relayDeviceLabelState by mutableStateOf("")
 
     /** Empêche de rouvrir le dialog cert relay en boucle tant que relayCertCheck reste non-null. */
     private var relayCertDialogShown = false
@@ -108,6 +109,7 @@ class SettingsFragment : Fragment() {
                             relayManualUrl = relayManualUrlState,
                             relayManualCode = relayManualCodeState,
                             relayErrorMessage = relayErrorMessageState,
+                            relayDeviceLabel = relayDeviceLabelState,
                             ttsProvider = ttsProviderState,
                             ttsProviderSubOptions = ttsSubOptionsState,
                             ttsSelectedSubOption = ttsSelectedSubOptionState,
@@ -139,6 +141,10 @@ class SettingsFragment : Fragment() {
                             onScanQrPairing = { (activity as? MainActivity)?.scanQrForPairing() },
                             onRelayManualUrlChange = { url -> relayManualUrlState = url },
                             onRelayManualCodeChange = { code -> relayManualCodeState = code },
+                            onRelayDeviceLabelChange = { label ->
+                                relayDeviceLabelState = label
+                                settings.relayDeviceLabel = label
+                            },
                             onDismissRelayError = { viewModel.clearError() },
                             onRelayToggle = { enabled -> onRelayToggle(enabled) },
                             onDisconnectWebUi = { viewModel.disconnectWebUi() },
@@ -217,6 +223,8 @@ class SettingsFragment : Fragment() {
 
         webUiServerUrlState = settings.webUiServerUrl
         webUiLoggedInState = !settings.webUiSessionCookie.isNullOrBlank()
+
+        relayDeviceLabelState = settings.relayDeviceLabel
 
         ttsProviderState = settings.ttsProvider.ifBlank { viewModel.getCurrentTtsProvider() }
     }

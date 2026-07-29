@@ -249,17 +249,21 @@ class ConnectionManager(
                 )
                 webSocket.send(authEnvelope.toString())
 
-                // Annonce les capabilities activées+autorisées à chaque (re)connexion — le
-                // relay les persiste par device (voir server/relay/pairing.py Session.capabilities)
-                // et plugin/hasan_delivery/tools.py les récupère dynamiquement via
-                // GET /capabilities, plutôt que de dupliquer les schémas côté Python.
+                // Annonce le libellé + les capabilities activées+autorisées à chaque
+                // (re)connexion — le relay les persiste par device (voir
+                // server/relay/pairing.py Session.capabilities/device_label) et
+                // plugin/hasan_delivery/tools.py les récupère dynamiquement via
+                // GET /devices, plutôt que de dupliquer les schémas côté Python.
+                // Le libellé vient de settings.relayDeviceLabel (personnalisable
+                // dans Réglages), pas recalculé ici, pour rester stable entre
+                // reconnexions même si l'utilisateur l'a édité.
                 val capsEnvelope = Envelope(
                     channel = "system",
                     type = "capabilities",
-                    payload = JSONObject().put(
-                        "capabilities",
-                        capabilitiesAnnouncementJson(context, settings)
-                    )
+                    payload = JSONObject().apply {
+                        put("device_label", settings.relayDeviceLabel)
+                        put("capabilities", capabilitiesAnnouncementJson(context, settings))
+                    }
                 )
                 webSocket.send(capsEnvelope.toString())
 

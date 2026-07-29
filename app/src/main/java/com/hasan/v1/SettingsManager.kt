@@ -268,6 +268,32 @@ class SettingsManager(context: Context) {
         }
         set(value) = encryptedPrefs.edit().putString("relay_device_hash", value).apply()
 
+    /**
+     * Libellé lisible de ce device pour le relay (affiché dans GET /devices,
+     * utilisé par le LLM pour désambiguïser quand plusieurs devices sont
+     * connectés — voir plugin/hasan_delivery/tools.py::_resolve_device_id).
+     * Personnalisable dans Réglages ; sinon dérivé de Build.MANUFACTURER +
+     * Build.MODEL à la première lecture.
+     */
+    var relayDeviceLabel: String
+        get() {
+            val existing = encryptedPrefs.getString("relay_device_label", null)
+            if (existing != null) return existing
+            val generated = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+            encryptedPrefs.edit().putString("relay_device_label", generated).apply()
+            return generated
+        }
+        set(value) {
+            val trimmed = value.trim()
+            if (trimmed.isEmpty()) {
+                // Un libellé vidé retombe sur la valeur auto-générée plutôt que
+                // d'envoyer une chaîne vide au relay (voir écran Réglages).
+                encryptedPrefs.edit().remove("relay_device_label").apply()
+            } else {
+                encryptedPrefs.edit().putString("relay_device_label", trimmed).apply()
+            }
+        }
+
     // ─────────────────────── hermes-webui (chat REST/SSE) ───────────────────────
 
     /** URL de base hermes-webui (ex: "https://34.155.193.170"), distincte de [relayServerUrl] — voir com.hasan.v1.webui. */

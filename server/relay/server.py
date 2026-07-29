@@ -39,6 +39,7 @@ from aiohttp import web
 
 from bridge_commands import BridgeCommandRegistry, CommandTimeoutError
 from chat_stream import ChatSessionRegistry
+from device_watch import DeviceChangeSignal
 from envelope import Envelope, EnvelopeError
 from pairing import DEFAULT_SESSIONS_PATH, PairingManager
 from push_buffer import PushBuffer
@@ -81,6 +82,10 @@ KEY_PUBLIC_URL = web.AppKey("public_url", str)
 # fonctionnel pour le bridge, juste sans ces deux champs dans la réponse.
 KEY_WEBUI_URL = web.AppKey("webui_url", str)
 KEY_WEBUI_PASSWORD = web.AppKey("webui_password", str)
+# Signal "un device a changé" (connexion/déconnexion/capabilities) — pour
+# GET /devices/watch, consommé par plugin/hasan_delivery pour savoir quand
+# relire GET /devices sans avoir à faire du polling serré. Voir device_watch.py.
+KEY_DEVICE_WATCH = web.AppKey("device_watch", DeviceChangeSignal)
 
 
 def _client_ip(request: web.Request) -> str:
@@ -316,18 +321,81 @@ async def handle_capabilities(request: web.Request) -> web.Response:
     return web.json_response({"capabilities": capabilities})
 
 
+async def handle_devices_list(request: web.Request) -> web.Response:
+    """GET /devices — admin-authed, liste tous les devices connus (persistés),
+    avec leur état de connexion live et leurs capabilities. Consommé par
+    plugin/hasan_delivery/tools.py pour construire l'union des tools
+    function-calling à travers tous les devices appairés (voir
+    handle_pairing_create pour le modèle d'auth repris ici : admin_token, pas
+    session_token — cet endpoint est intrinsèquement cross-device, aucun
+    session_token de device particulier ne pourrait le scoper correctement).
+    """
+    admin_token = request.app[KEY_ADMIN_TOKEN]
+    if not admin_token:
+        return web.json_response({"error": "admin_token_not_configured"}, status=503)
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    active_connections = request.app[KEY_ACTIVE_CONNECTIONS]
+    devices = []
+    for session in request.app[KEY_PAIRING_MANAGER].list_devices():
+        ws = active_connections.get(session.device_hash)
+        devices.append({
+            "device_id": session.device_hash,
+            "label": session.device_label,
+            "connected": ws is not None and not ws.closed,
+            "capabilities": session.capabilities or [],
+        })
+    return web.json_response({"devices": devices})
+
+
+async def handle_devices_watch(request: web.Request) -> web.Response:
+    """GET /devices/watch?timeout=30 — long-poll admin-authed : bloque jusqu'à
+    ce que l'ensemble des devices OU les capabilities/label d'un device
+    changent, ou jusqu'à `timeout` secondes. Retourne juste un signal, pas
+    l'état lui-même — l'appelant relit GET /devices après réveil (voir
+    device_watch.py pour le pourquoi d'un signal unique non granulaire).
+    """
+    admin_token = request.app[KEY_ADMIN_TOKEN]
+    if not admin_token:
+        return web.json_response({"error": "admin_token_not_configured"}, status=503)
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        timeout = float(request.query.get("timeout", "30"))
+    except ValueError:
+        timeout = 30.0
+    timeout = max(0.0, min(timeout, 60.0))
+
+    changed = await request.app[KEY_DEVICE_WATCH].wait(timeout)
+    return web.json_response({"changed": changed})
+
+
 async def handle_bridge_command(request: web.Request) -> web.Response:
     """Entrée pour le plugin Hermes (tool function-calling) : exécute une
-    capability sur le téléphone via le canal `bridge` du WS, attend le
+    capability sur UN device explicite via le canal `bridge` du WS, attend le
     résultat borné dans le temps (voir bridge_commands.py).
 
-    Contrat requête : {"capability": str, "params": dict} — même vocabulaire
-    que côté Android (CapabilityExecutor.execute(capability, params)).
+    Authentification par admin_token (pas session_token) — le token de
+    session est intrinsèquement scopé à un device, alors que ce endpoint
+    cible n'importe quel device connu depuis que le plugin gère plusieurs
+    devices simultanément ; le plugin agit comme un opérateur de confiance
+    cross-device, pas comme un device particulier (même modèle que
+    GET /devices).
+
+    Contrat requête : {"device_id": str, "capability": str, "params": dict}
+    — device_id correspond au device_hash retourné par GET /devices.
     Retourne le résultat de la capability tel que renvoyé par le téléphone,
     ou une erreur si le device n'est pas connecté / ne répond pas à temps.
     """
-    device_hash = _require_session(request)
-    if device_hash is None:
+    admin_token = request.app[KEY_ADMIN_TOKEN]
+    if not admin_token:
+        return web.json_response({"error": "admin_token_not_configured"}, status=503)
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
         return web.json_response({"error": "unauthorized"}, status=401)
 
     try:
@@ -335,6 +403,9 @@ async def handle_bridge_command(request: web.Request) -> web.Response:
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid_json"}, status=400)
 
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        return web.json_response({"error": "missing_device_id"}, status=400)
     capability = body.get("capability")
     if not isinstance(capability, str) or not capability:
         return web.json_response({"error": "missing_capability"}, status=400)
@@ -344,7 +415,7 @@ async def handle_bridge_command(request: web.Request) -> web.Response:
     if not isinstance(params, dict):
         return web.json_response({"error": "params_must_be_object"}, status=400)
 
-    ws = request.app[KEY_ACTIVE_CONNECTIONS].get(device_hash)
+    ws = request.app[KEY_ACTIVE_CONNECTIONS].get(device_id)
     if ws is None or ws.closed:
         return web.json_response({"error": "device_not_connected"}, status=503)
 
@@ -439,6 +510,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
 
     device_hash = session.device_hash
     active_connections = request.app[KEY_ACTIVE_CONNECTIONS]
+    device_watch = request.app[KEY_DEVICE_WATCH]
 
     previous = active_connections.get(device_hash)
     if previous is not None and not previous.closed:
@@ -454,6 +526,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
         await previous.close(code=4000, message=b"superseded_by_new_connection")
     else:
         active_connections[device_hash] = ws
+    device_watch.bump()
     log.info("WS connecté device_hash=%s...", device_hash[:8])
 
     for pending_envelope in request.app[KEY_PUSH_BUFFER].drain(device_hash):
@@ -474,6 +547,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                     hermes_api_base_url=request.app[KEY_HERMES_API_BASE_URL],
                     hermes_api_token=request.app[KEY_HERMES_API_TOKEN],
                     pairing_manager=request.app[KEY_PAIRING_MANAGER],
+                    device_watch=device_watch,
                 )
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 log.warning("WS erreur device_hash=%s...: %s", device_hash[:8], ws.exception())
@@ -486,6 +560,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
             # en cours doivent survivre, la nouvelle connexion les récupère
             # via la re-résolution de `ws` dans send_envelope (chat_stream.py).
             chat_sessions.cancel_all_for_device(device_hash)
+            device_watch.bump()
         log.info("WS déconnecté device_hash=%s...", device_hash[:8])
 
     return ws
@@ -563,6 +638,7 @@ async def _dispatch_inbound(
     hermes_api_base_url: str,
     hermes_api_token: str,
     pairing_manager: PairingManager,
+    device_watch: DeviceChangeSignal,
 ) -> None:
     try:
         data = json.loads(raw)
@@ -579,7 +655,12 @@ async def _dispatch_inbound(
     if envelope.channel == "system" and envelope.type == "capabilities":
         caps = envelope.payload.get("capabilities")
         if isinstance(caps, list):
-            pairing_manager.update_capabilities(device_hash, caps)
+            device_label = envelope.payload.get("device_label")
+            if device_label is not None and not isinstance(device_label, str):
+                device_label = None
+            changed = pairing_manager.update_capabilities(device_hash, caps, device_label)
+            if changed:
+                device_watch.bump()
         else:
             log.warning("Enveloppe system/capabilities malformée (capabilities non-liste) id=%s", envelope.id)
         return
@@ -676,6 +757,7 @@ def create_app(
     app[KEY_PUBLIC_URL] = public_url.rstrip("/")
     app[KEY_WEBUI_URL] = webui_url.rstrip("/")
     app[KEY_WEBUI_PASSWORD] = webui_password
+    app[KEY_DEVICE_WATCH] = DeviceChangeSignal()
 
     app.router.add_get("/health", handle_health)
     app.router.add_get("/version", handle_version)
@@ -687,6 +769,8 @@ def create_app(
     app.router.add_get("/phone/outbound", handle_phone_outbound)
     app.router.add_post("/bridge/command", handle_bridge_command)
     app.router.add_get("/capabilities", handle_capabilities)
+    app.router.add_get("/devices", handle_devices_list)
+    app.router.add_get("/devices/watch", handle_devices_watch)
     app.router.add_get("/ws", handle_ws)
     return app
 

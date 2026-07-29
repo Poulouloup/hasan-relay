@@ -62,6 +62,9 @@ graphify-out/
 
 # Tests manuels (locaux)
 tests/
+# ...sauf les vrais tests automatisés pytest du plugin (pas des tests
+# manuels, doivent être versionnés et lancés en CI comme server/relay/).
+!plugin/hasan_delivery/tests/
 
 # Scripts dev (locaux)
 scripts/

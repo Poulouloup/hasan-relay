@@ -71,9 +71,17 @@ class Session:
     # Capabilities annoncées par l'app à la connexion WS (envelope
     # system/capabilities, voir ConnectionManager.kt côté app) — None pour
     # une session migrée depuis un ancien format sans ce champ, ou avant la
-    # première annonce. Exposé en lecture via GET /capabilities pour
-    # plugin/hasan_delivery/tools.py (voir server.py handle_capabilities).
+    # première annonce. Exposé en lecture via GET /devices pour
+    # plugin/hasan_delivery/tools.py (voir server.py handle_devices_list).
     capabilities: list[dict] | None = None
+    # Libellé lisible du device (ex: "Pixel 8 Pro"), annoncé dans le même
+    # envelope system/capabilities (Build.MANUFACTURER + Build.MODEL côté
+    # Android, voir CapabilitySchema.kt::deviceLabel) — None pour une session
+    # migrée depuis un ancien format, ou avant la première annonce. Purement
+    # cosmétique (affichage dans GET /devices, messages d'erreur du plugin
+    # en cas d'ambiguïté multi-device) — jamais utilisé pour l'auth ou le
+    # routage, qui restent basés sur device_hash.
+    device_label: str | None = None
 
     def expired(self) -> bool:
         return time.time() - self.last_seen_at > SESSION_TOKEN_TTL_SECONDS
@@ -92,6 +100,7 @@ class Session:
             "refresh_token_hash": self.refresh_token_hash,
             "refresh_expires_at": self.refresh_expires_at,
             "capabilities": self.capabilities,
+            "device_label": self.device_label,
         }
 
     @staticmethod
@@ -105,6 +114,7 @@ class Session:
                 refresh_token_hash=data.get("refresh_token_hash"),
                 refresh_expires_at=data.get("refresh_expires_at"),
                 capabilities=data.get("capabilities"),
+                device_label=data.get("device_label"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -191,8 +201,13 @@ class PairingManager:
             return None
         return max(matches, key=lambda s: s.last_seen_at)
 
-    def update_capabilities(self, device_hash: str, capabilities: list[dict]) -> None:
-        """Persiste les capabilities annoncées par l'app (envelope system/capabilities).
+    def update_capabilities(
+        self, device_hash: str, capabilities: list[dict], device_label: str | None = None
+    ) -> bool:
+        """Persiste les capabilities (+ libellé) annoncés par l'app (envelope
+        system/capabilities). Retourne True si un changement réel a eu lieu
+        (contenu OU libellé) — utilisé par server.py pour ne signaler le
+        watcher multi-device (voir device_watch.py) que sur un vrai changement.
 
         Comme touch(), évite une écriture disque à chaque appel — mais ici la
         comparaison de contenu (pas juste un TTL glissant) permet de ne
@@ -200,10 +215,27 @@ class PairingManager:
         reconnexion WS n'implique pas forcément un changement de capabilities).
         """
         session = self.get_session_by_device_hash(device_hash)
-        if session is None or session.capabilities == capabilities:
-            return
+        if session is None:
+            return False
+        if session.capabilities == capabilities and session.device_label == device_label:
+            return False
         session.capabilities = capabilities
+        session.device_label = device_label
         self._save_to_disk()
+        return True
+
+    def list_devices(self) -> list[Session]:
+        """Une session par device_hash connu (la plus récente — même règle que
+        get_session_by_device_hash), pour GET /devices. Inclut les devices non
+        connectés actuellement — cette méthode ne connaît pas les WebSockets,
+        la connectivité live est résolue séparément par l'appelant via
+        KEY_ACTIVE_CONNECTIONS (server.py)."""
+        latest: dict[str, Session] = {}
+        for session in self._sessions.values():
+            current = latest.get(session.device_hash)
+            if current is None or session.last_seen_at > current.last_seen_at:
+                latest[session.device_hash] = session
+        return list(latest.values())
 
     def refresh(self, refresh_token: str) -> RefreshResult | None:
         """Échange un refresh_token contre un nouveau (session_token, refresh_token).
