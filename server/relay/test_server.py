@@ -951,6 +951,49 @@ async def test_send_fcm_wake_noop_without_fcm_token(paired_client):
     await server._send_fcm_wake(fake_app, device_hash)  # ne doit pas lever
 
 
+async def test_send_fcm_wake_passes_app_as_keyword(paired_client, monkeypatch):
+    """Régression : run_in_executor(None, messaging.send, message, fcm_app)
+    passe fcm_app comme 3e positionnel de messaging.send(message, dry_run,
+    app) — donc sur dry_run, pas sur app. firebase-admin accepte un dry_run
+    non-bool sans lever (bool(fcm_app) est truthy) et retourne fake_message_id
+    sans jamais contacter Google : aucune exception, mais le device ne reçoit
+    jamais le réveil. Découvert en test réel sur device (voir CHANGELOG) —
+    ce test verrouille le fix (functools.partial avec app= en keyword)."""
+    client, token, device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+
+    calls = []
+
+    class FakeMessaging:
+        @staticmethod
+        def Message(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def AndroidConfig(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def send(message, dry_run=False, app=None):
+            calls.append({"message": message, "dry_run": dry_run, "app": app})
+            return "projects/fake/messages/1"
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "firebase_admin.messaging", FakeMessaging)
+    fake_fcm_app = object()
+    fake_app: dict = dict(client.app)
+    fake_app[server.KEY_FCM_APP] = fake_fcm_app
+
+    await server._send_fcm_wake(fake_app, device_hash)
+
+    assert len(calls) == 1
+    assert calls[0]["app"] is fake_fcm_app
+    assert calls[0]["dry_run"] is False
+
+
 async def test_send_fcm_wake_called_when_configured_and_no_ws(paired_client, monkeypatch):
     """Avec un KEY_FCM_APP mocké, _send_fcm_wake doit être appelée quand (a)
     pas de WS actif ET (b) un fcm_token existe pour ce device."""

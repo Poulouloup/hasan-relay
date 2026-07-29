@@ -171,6 +171,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             multiplexer.proactive.collect { envelope ->
                 activityLog.log("Notification proactive : ${envelope.type}", tag = "PUSH")
+                if (envelope.type != "message") return@collect
+                val text = envelope.payload.optString("text").takeIf { it.isNotBlank() } ?: return@collect
+                // App foreground : rien à afficher en plus du log ci-dessus —
+                // pas d'écran dédié au canal proactif pour l'instant. App
+                // fermée (pas de WS) : couvert par HasanFirebaseMessagingService
+                // via le réveil FCM, chemin séparé (même ProactiveNotifier).
+                if (!isAppInForeground()) {
+                    com.hasan.v1.network.ProactiveNotifier.show(getApplication(), text)
+                }
             }
         }
         viewModelScope.launch {

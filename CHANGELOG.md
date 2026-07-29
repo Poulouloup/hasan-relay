@@ -181,6 +181,33 @@ montre déjà le quoi).
   correctement) — remis au comportement simple d'origine.
 
 ### Fixed
+- `_send_fcm_wake` (`server/relay/server.py`) appelait
+  `run_in_executor(None, messaging.send, message, fcm_app)` — le 3e argument
+  positionnel atterrit sur `dry_run` (signature réelle :
+  `send(message, dry_run=False, app=None)`), pas sur `app`. `bool(fcm_app)`
+  étant toujours vrai, chaque envoi passait silencieusement en mode dry-run :
+  `messaging.send()` retournait `projects/.../messages/fake_message_id` sans
+  jamais contacter Google, donc sans jamais réveiller le device — aucune
+  exception levée, `log.info("Réveil FCM envoyé...")` s'affichait quand même.
+  Découvert uniquement via test réel sur device (aucun test existant
+  n'exerçait le vrai appel `messaging.send`, tous mockaient `_send_fcm_wake`
+  dans son ensemble). Fix : `functools.partial(messaging.send, message,
+  app=fcm_app)` pour forcer `app` en keyword. Nouveau test de régression
+  (`test_send_fcm_wake_passes_app_as_keyword`) qui mocke `messaging.send`
+  lui-même plutôt que `_send_fcm_wake`.
+- Canal `proactive` (WebSocket) jamais affiché comme notification Android
+  quand l'app est en arrière-plan mais son WebSocket encore actif —
+  `MainViewModel` ne faisait que logger l'événement dans `ActivityLog`
+  (`tag = "PUSH"`, visible seulement via Réglages → À propos → Voir les
+  logs) sans jamais appeler `ProactiveNotifier.show()`. La classe
+  `ProactiveMessageHandler`, écrite précisément pour ce cas, n'était
+  instanciée nulle part dans l'app — code mort depuis sa création. Découvert
+  en testant le scénario "app en arrière-plan" après validation des deux
+  scénarios FCM (redémarrage téléphone, fermeture via bouton Quitter), qui
+  fonctionnaient déjà. Fix : `MainViewModel` appelle directement
+  `ProactiveNotifier.show()` quand `!isAppInForeground()` (même pattern déjà
+  utilisé pour le canal `chat`/`NotificationHelper`) ; `ProactiveMessageHandler`
+  supprimé (logique dupliquée, jamais câblée).
 - `PairingManager.get_session_by_device_hash()` (`server/relay/pairing.py`)
   retournait la première session trouvée pour un device (ordre d'insertion,
   donc la plus ancienne) au lieu de la plus récente — un device accumule une

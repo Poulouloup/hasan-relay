@@ -36,6 +36,7 @@ Variables d'environnement :
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -287,8 +288,11 @@ async def _send_fcm_wake(app: web.Application, device_hash: str) -> None:
         android=messaging.AndroidConfig(priority="high"),
     )
     try:
+        # app doit être passé en keyword — messaging.send(message, dry_run,
+        # app) : un 3e positionnel atterrit sur dry_run, pas app, et déclenche
+        # un envoi factice (fake_message_id) sans jamais toucher le device.
         await asyncio.get_event_loop().run_in_executor(
-            None, messaging.send, message, fcm_app
+            None, functools.partial(messaging.send, message, app=fcm_app)
         )
         log.info("Réveil FCM envoyé device_hash=%s...", device_hash[:8])
     except Exception as exc:
