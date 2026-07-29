@@ -449,6 +449,21 @@ class SettingsFragment : Fragment() {
                     relayEnabledState = state.relayEnabled
                     relayConnectionStatusState = state.relayConnectionStatus
                     relayErrorMessageState = state.relayErrorMessage
+
+                    // Un pairing QR réussi met à jour state.webUiLoggedIn directement
+                    // (contournant connectToWebUi()/son bouton "Se connecter"), mais
+                    // ne touche jamais webUiConnectionStatusState — un message
+                    // d'erreur affiché avant le scan (ex: "URL et mot de passe
+                    // requis" suite à un tap sur "Se reconnecter" prématuré) restait
+                    // donc affiché indéfiniment par-dessus un état pourtant connecté
+                    // (voir SettingsScreen : webUiConnectionStatus?.message a priorité
+                    // sur le fallback basé sur webUiLoggedIn). On efface ce message
+                    // périmé et on recharge profils/MCP dès que l'état passe à connecté.
+                    if (state.webUiLoggedIn && !webUiLoggedInState) {
+                        webUiConnectionStatusState = null
+                        loadHermesProfiles()
+                        loadMcpServers()
+                    }
                     webUiLoggedInState = state.webUiLoggedIn
 
                     val certCheck = state.relayCertCheck
