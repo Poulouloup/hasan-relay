@@ -119,6 +119,60 @@ fail2ban-client status hermes-webui
 
 before assuming a routing or credentials problem.
 
+## 5. FCM wake-up for proactive notifications (app closed / no active WS)
+
+The relay can wake the Android app via Firebase Cloud Messaging (data-only,
+never carries message text) when a proactive push (`POST /phone/message`
+with no active WebSocket for that device) needs to reach a fully-closed
+app. This is a separate accelerator on top of the existing WS + push-buffer
+delivery path — not a replacement for it.
+
+Flow: `POST /phone/message` (no WS) → `push_buffer.push()` (unchanged) →
+`server.py::_send_fcm_wake()` sends `{"type":"wake"}` via `firebase-admin`
+→ device's `HasanFirebaseMessagingService.onMessageReceived()` fires →
+`GET /phone/pending` (session-token auth) drains the buffer → real Android
+notification via `ProactiveNotifier.show()`.
+
+Config/state involved:
+- `RELAY_FCM_CREDENTIALS_PATH` env var on the relay (systemd unit override,
+  see `DEPLOYMENT.md`) — path to the Firebase service-account JSON. Absent
+  or invalid → `_init_fcm_app()` logs a warning and returns `None`;
+  `/phone/message` keeps working exactly as before (WS + buffer only), no
+  crash, no exception surfaced to the caller.
+- `Session.fcm_token` (`server/relay/pairing.py`) — the device's current
+  FCM token, synced via `POST /fcm-token` (session-token auth). Synced from
+  three points app-side: `onNewToken()`, right after a successful pairing,
+  and as a best-effort refresh on every WS `onOpen()` — so a token learned
+  while offline still reaches the relay on the next reconnect even without
+  a fresh `onNewToken()` firing.
+- `GET /phone/pending` is NOT the same as `GET /phone/outbound` — pending
+  drains (removes) buffered envelopes, outbound is a read-only peek. Don't
+  conflate the two when debugging a "message never arrived after wake"
+  report — draining twice in a row correctly returns an empty list the
+  second time, that's not a bug.
+
+**Known false-negative when testing manually**: `adb shell am force-stop
+<pkg>` puts the app in a persistent "stopped" state that Android
+deliberately blocks ALL external wake-ups for (FCM included) until the app
+is relaunched by the user — confirmed via `W/GCM: broadcast intent
+callback: result=CANCELLED` in logcat. This is not a bug in this delivery
+path; it reproduces the same restriction as the user tapping "Force stop"
+in system Settings. To test a real closed-app scenario, use the app's own
+"Quitter" button (drawer → confirm) or a full device reboot instead —
+both were verified end-to-end on a real device (Pixel 10, Android 16) and
+deliver correctly; only the `am force-stop` shortcut is unreliable as a
+test method.
+
+```bash
+# Confirm FCM is configured on the relay (no secret printed)
+sudo systemctl show hermes-relay -p Environment | grep -o 'RELAY_FCM_CREDENTIALS_PATH=[^ ]*'
+
+# Watch for the two log lines that confirm the FCM path was taken
+sudo journalctl -u hermes-relay -f | grep -i fcm
+# "Réveil FCM envoyé device_hash=..." = firebase-admin accepted the send
+# "Échec envoi FCM device_hash=..." = send failed (stale token, bad creds) — logged only, never raised
+```
+
 ## Non-goals
 
 This skill is diagnostic only. It never restarts or recreates containers
