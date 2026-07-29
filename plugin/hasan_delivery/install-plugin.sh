@@ -4,9 +4,10 @@
 # Copie ce dossier vers ${HERMES_HOME:-~/.hermes}/plugins/hasan_delivery/ (le
 # loader de plugins Hermes scanne ce dossier au démarrage du gateway) et
 # installe sa dépendance (httpx) dans le venv de hermes-agent. Copie aussi
-# skills/hasan-bridge-diagnosis/ vers ${HERMES_HOME}/skills/general/ si
-# présent (skill de diagnostic lu par l'agent Hermes, format natif Hermes —
-# distinct des skills .claude/skills/ de ce repo qui sont pour Claude Code).
+# chaque sous-dossier de skills/ (ex: hasan-bridge-diagnosis,
+# hasan-plugin-architecture) vers ${HERMES_HOME}/skills/general/ — skills lus
+# par l'agent Hermes, format natif Hermes, distincts des skills
+# .claude/skills/ de ce repo qui sont pour Claude Code.
 #
 # Ne configure PAS les variables d'environnement (HASAN_RELAY_URL,
 # HASAN_RELAY_SESSION_TOKEN, ...) — voir README.md pour ça, ça dépend de
@@ -50,16 +51,20 @@ echo "==> Dépendances Python (httpx) dans le venv hermes-agent"
 # c'est le module qui est garanti présent, pas un binaire de nom variable.
 "${AGENT_VENV}/bin/python" -m pip install --quiet -r "${PLUGIN_DEST}/requirements.txt"
 
-SKILL_SRC="${SCRIPT_DIR}/skills/hasan-bridge-diagnosis"
-SKILL_DEST="${HERMES_HOME}/skills/general/hasan-bridge-diagnosis"
-SKILL_INSTALLED=0
-if [[ -d "${SKILL_SRC}" ]]; then
-    echo "==> Copie du skill de diagnostic vers ${SKILL_DEST}"
+SKILLS_SRC_DIR="${SCRIPT_DIR}/skills"
+INSTALLED_SKILLS=()
+if [[ -d "${SKILLS_SRC_DIR}" ]]; then
     mkdir -p "${HERMES_HOME}/skills/general"
-    rm -rf "${SKILL_DEST}"
-    mkdir -p "${SKILL_DEST}"
-    cp -r "${SKILL_SRC}"/. "${SKILL_DEST}/"
-    SKILL_INSTALLED=1
+    for skill_dir in "${SKILLS_SRC_DIR}"/*/; do
+        [[ -d "${skill_dir}" ]] || continue
+        skill_name="$(basename "${skill_dir}")"
+        skill_dest="${HERMES_HOME}/skills/general/${skill_name}"
+        echo "==> Copie du skill ${skill_name} vers ${skill_dest}"
+        rm -rf "${skill_dest}"
+        mkdir -p "${skill_dest}"
+        cp -r "${skill_dir}"/. "${skill_dest}/"
+        INSTALLED_SKILLS+=("${skill_name}")
+    done
 fi
 
 cat <<EOF
@@ -72,6 +77,6 @@ Reste à faire, si pas déjà en place :
   2. Redémarrer le gateway : hermes gateway restart
   3. Vérifier les logs : journalctl --user -u hermes-gateway.service -f | grep -i hasan_delivery
 EOF
-if [[ "${SKILL_INSTALLED}" -eq 1 ]]; then
-    echo "Skill hasan-bridge-diagnosis installé dans ${SKILL_DEST}."
+if [[ "${#INSTALLED_SKILLS[@]}" -gt 0 ]]; then
+    echo "Skills installés dans ${HERMES_HOME}/skills/general/ : ${INSTALLED_SKILLS[*]}"
 fi
