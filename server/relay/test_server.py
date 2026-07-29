@@ -827,3 +827,170 @@ async def test_devices_watch_timeout_returns_changed_false(client):
     assert resp.status == 200
     body = await resp.json()
     assert body["changed"] is False
+
+
+# ─────────────────────────── FCM (POST /fcm-token, GET /phone/pending) ─────
+
+
+async def test_fcm_token_requires_auth(client):
+    resp = await client.post("/fcm-token", json={"fcm_token": "x"})
+    assert resp.status == 401
+
+
+async def test_fcm_token_accepts_valid_token(paired_client):
+    client, token, device_hash = paired_client
+    resp = await client.post(
+        "/fcm-token",
+        json={"fcm_token": "fake-fcm-token"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {"ok": True}
+
+    session = client.app[server.KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    assert session.fcm_token == "fake-fcm-token"
+
+
+async def test_fcm_token_accepts_null_for_deregistration(paired_client):
+    client, token, device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-fcm-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    resp = await client.post(
+        "/fcm-token", json={"fcm_token": None}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status == 200
+    session = client.app[server.KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    assert session.fcm_token is None
+
+
+async def test_fcm_token_rejects_non_string_token(paired_client):
+    client, token, _device_hash = paired_client
+    resp = await client.post(
+        "/fcm-token", json={"fcm_token": 12345}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status == 400
+
+
+async def test_phone_pending_requires_auth(client):
+    resp = await client.get("/phone/pending")
+    assert resp.status == 401
+
+
+async def test_phone_pending_returns_and_drains_buffered_messages(paired_client):
+    """Message envoyé sans WS actif → bufferisé → /phone/pending le retourne
+    ET le vide (contrat drain, pas peek — voir handle_phone_pending)."""
+    client, token, _device_hash = paired_client
+
+    resp = await client.post(
+        "/phone/message", json={"text": "en attente"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    body = await resp.json()
+    assert body["delivered"] is False  # pas de WS actif
+
+    resp = await client.get("/phone/pending", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status == 200
+    body = await resp.json()
+    assert len(body["messages"]) == 1
+    assert body["messages"][0]["payload"]["text"] == "en attente"
+
+    # Deuxième appel immédiat — buffer déjà drainé, liste vide.
+    resp = await client.get("/phone/pending", headers={"Authorization": f"Bearer {token}"})
+    body = await resp.json()
+    assert body["messages"] == []
+
+
+async def test_phone_pending_does_not_interfere_with_ws_drain(paired_client):
+    """Un drainage HTTP suivi d'une connexion WS ne doit pas redélivrer les
+    messages déjà récupérés via /phone/pending."""
+    client, token, _device_hash = paired_client
+
+    await client.post(
+        "/phone/message", json={"text": "msg"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    await client.get("/phone/pending", headers={"Authorization": f"Bearer {token}"})
+
+    ws = await connect_and_auth(client, token)
+    # Rien à drainer au connect — envoyer un ping pour confirmer que la
+    # connexion fonctionne normalement sans redélivrance surprise.
+    await ws.send_json({"version": 1, "channel": "system", "type": "ping", "payload": {}})
+    msg = await ws.receive_json()
+    assert msg["type"] == "pong"
+    await ws.close()
+
+
+async def test_send_fcm_wake_noop_when_fcm_not_configured(paired_client):
+    """Sans firebase-admin configuré (KEY_FCM_APP=None, cas par défaut des
+    tests), /phone/message continue de fonctionner exactement comme avant —
+    dégradation gracieuse, pas d'erreur."""
+    client, token, device_hash = paired_client
+    assert client.app[server.KEY_FCM_APP] is None
+
+    resp = await client.post(
+        "/phone/message", json={"text": "sans fcm"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["delivered"] is False  # toujours bufferisé normalement
+
+    pending = client.app[server.KEY_PUSH_BUFFER].pending_count(device_hash)
+    assert pending == 1
+
+
+async def test_send_fcm_wake_noop_without_fcm_token(paired_client):
+    """_send_fcm_wake appelée directement (pas via /phone/message) : même
+    avec KEY_FCM_APP non-None, sans fcm_token pour ce device elle doit
+    retourner silencieusement sans lever ni tenter d'appel messaging.send
+    (device n'a jamais transmis de token — app non mise à jour, ou FCM
+    indisponible côté device). N'accède qu'au dict app[...] via .get()/
+    indexation en lecture, pas de mutation d'une TestClient app démarrée."""
+    client, _token, device_hash = paired_client
+    fake_app: dict = dict(client.app)
+    fake_app[server.KEY_FCM_APP] = object()  # non-None, jamais utilisé (pas de fcm_token à ce stade)
+    await server._send_fcm_wake(fake_app, device_hash)  # ne doit pas lever
+
+
+async def test_send_fcm_wake_called_when_configured_and_no_ws(paired_client, monkeypatch):
+    """Avec un KEY_FCM_APP mocké, _send_fcm_wake doit être appelée quand (a)
+    pas de WS actif ET (b) un fcm_token existe pour ce device."""
+    client, token, _device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+
+    calls = []
+
+    async def fake_send_fcm_wake(app, device_hash):
+        calls.append(device_hash)
+
+    monkeypatch.setattr(server, "_send_fcm_wake", fake_send_fcm_wake)
+
+    await client.post(
+        "/phone/message", json={"text": "avec fcm"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert len(calls) == 1
+
+
+async def test_send_fcm_wake_not_called_when_ws_active(paired_client, monkeypatch):
+    """Pas de réveil FCM nécessaire si le device a déjà un WS actif — le
+    message est livré en direct."""
+    client, token, _device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    calls = []
+
+    async def fake_send_fcm_wake(app, device_hash):
+        calls.append(device_hash)
+
+    monkeypatch.setattr(server, "_send_fcm_wake", fake_send_fcm_wake)
+
+    ws = await connect_and_auth(client, token)
+    resp = await client.post(
+        "/phone/message", json={"text": "live"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    body = await resp.json()
+    assert body["delivered"] is True
+    assert calls == []
+    await ws.close()

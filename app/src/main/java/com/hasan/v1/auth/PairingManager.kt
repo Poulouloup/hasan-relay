@@ -3,7 +3,9 @@ package com.hasan.v1.auth
 import android.util.Log
 import com.hasan.v1.SettingsManager
 import com.hasan.v1.network.RelayUrlDeriver
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -174,6 +176,17 @@ class PairingManager(private val settings: SettingsManager) {
             settings.relayServerUrl = httpBaseUrl
             settings.relaySessionToken = sessionToken
             settings.relayRefreshToken = refreshToken
+            // Fire-and-forget : si un token FCM est déjà connu à ce stade (obtenu
+            // avant le pairing), on le pousse immédiatement plutôt que d'attendre
+            // une hypothétique reconnexion WS future — onNewToken()/le filet de
+            // sécurité de ConnectionManager.onOpen() couvrent les cas restants.
+            // Un échec ici ne doit jamais faire échouer le pairing lui-même.
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+                .addOnSuccessListener { fcmToken ->
+                    CoroutineScope(Dispatchers.IO).launch {
+                        com.hasan.v1.network.syncFcmTokenToRelay(settings, fcmToken)
+                    }
+                }
             Log.i(TAG, "Pairing réussi avec $httpBaseUrl")
             PairingResult.Success(httpBaseUrl, sessionToken)
         } catch (e: Exception) {

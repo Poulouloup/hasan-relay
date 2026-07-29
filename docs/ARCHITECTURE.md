@@ -157,6 +157,46 @@ Ce mécanisme remplace un ancien serveur MCP externe
 exposait les mêmes capabilities via le protocole MCP plutôt que le registre
 natif de Hermes — voir CHANGELOG.md pour le contexte de cette migration.
 
+### Réveil FCM des notifications proactives (optionnel)
+
+Le canal `proactive` (messagerie, voir ci-dessus) repose par défaut
+uniquement sur le WebSocket — qui ne survit pas de façon fiable quand l'app
+est en arrière-plan/fermée (pas de foreground service dédié, Doze mode peut
+couper la connexion). Firebase Cloud Messaging (FCM) comble ce trou comme
+**accélérateur optionnel**, jamais un prérequis :
+
+1. `POST /phone/message` (Hermes → relay) : si le device n'a pas de WS actif,
+   le message est bufferisé (`PushBuffer`, comme aujourd'hui) **et** un push
+   FCM **data-only** est envoyé (`server.py::_send_fcm_wake`, via
+   `firebase-admin`) — payload strictement `{"type": "wake"}`, jamais le
+   texte du message ni le device_hash.
+2. Le téléphone (app tuée ou en veille profonde) reçoit ce signal — Android
+   réveille brièvement `HasanFirebaseMessagingService.onMessageReceived()`,
+   sans lancer `MainActivity` ni allumer l'écran.
+3. Ce service ignore tout contenu venant du payload FCM lui-même (défense en
+   profondeur) et appelle `GET /phone/pending` sur le relay — canal HTTP
+   privé TLS, distinct de Google — pour récupérer le vrai texte et vider le
+   push buffer (`drain`, pas `peek` : un second appel immédiat renvoie une
+   liste vide).
+4. La notification Android réelle est affichée via `ProactiveNotifier.show()`
+   (extrait de `ProactiveMessageHandler`, réutilisé par les deux chemins WS
+   et FCM pour ne pas dupliquer la logique d'affichage).
+
+**Contrat de vie privée** : Google ne voit jamais que "un réveil a été
+envoyé à ce token, à cette heure" — jamais le contenu de la notification.
+Le token FCM lui-même est transmis au relay via `POST /fcm-token`
+(`Session.fcm_token` côté `pairing.py`), synchronisé à trois moments côté
+app : juste après un pairing réussi (`PairingManager.kt`), à chaque rotation
+du token (`HasanFirebaseMessagingService.onNewToken()`), et en filet de
+sécurité à chaque connexion WS réussie (`ConnectionManager.kt::onOpen`).
+
+**Dégradation gracieuse** : si `RELAY_FCM_CREDENTIALS_PATH` n'est pas
+configuré côté serveur (ou si l'app n'a jamais transmis de token FCM), le
+comportement reste strictement celui d'avant — WebSocket + push buffer,
+sans réveil, notification perdue si l'app reste fermée trop longtemps.
+Aucune des deux parties (app ou serveur) n'exige la configuration FCM de
+l'autre pour fonctionner.
+
 Voir DEPLOYMENT.md pour l'installation du relay et du plugin.
 
 ## Kanban

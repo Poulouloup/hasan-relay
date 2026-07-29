@@ -267,6 +267,16 @@ class ConnectionManager(
                 )
                 webSocket.send(capsEnvelope.toString())
 
+                // Filet de sécurité pour le token FCM (voir HasanFirebaseMessagingService) :
+                // resynchronise inconditionnellement à chaque connexion WS réussie, pas
+                // seulement à onNewToken()/post-pairing — couvre le cas où un token aurait
+                // été généré/persisté localement pendant que l'app était offline sans jamais
+                // avoir pu joindre POST /fcm-token (device sans réseau au moment de
+                // onNewToken()). Coût négligeable : requête HTTP légère, peu fréquente.
+                settings.relayFcmToken?.let { fcmToken ->
+                    scope.launch { syncFcmTokenToRelay(settings, fcmToken) }
+                }
+
                 attemptCount = 0
                 _connectionStatus.value = RelayConnectionStatus.CONNECTED
                 sessionTokenStore.markRenewed()

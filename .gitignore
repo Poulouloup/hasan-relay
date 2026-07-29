@@ -72,3 +72,8 @@ scripts/
 
 # Fichiers de travail / notes de session (locaux, non trackés)
 archive/
+
+# Config Firebase (identifiants du projet Firebase de l'opérateur — à
+# régénérer par chaque déploiement/fork depuis sa propre console Firebase,
+# voir SETUP.md §4)
+app/google-services.json

@@ -47,6 +47,12 @@ Le plugin lit ces variables d'environnement (voir aussi
 | `HASAN_RELAY_ADMIN_TOKEN` | non | Token admin pour générer des codes de pairing (`/pairing/create`) |
 | `HASAN_PHONE_ENABLED` | non | `false` pour désactiver le canal sans supprimer la config |
 
+Si le relay est configuré avec `RELAY_FCM_CREDENTIALS_PATH` (voir
+[`DEPLOYMENT.md`](../../DEPLOYMENT.md)), `POST /phone/message` déclenche
+aussi un réveil FCM data-only quand le device n'a pas de WebSocket actif —
+comportement transparent côté plugin, aucune variable/config supplémentaire
+ici (voir `docs/ARCHITECTURE.md` pour le flux complet).
+
 À définir dans l'environnement du service Hermes (ex. `~/.hermes/hermes-agent/.env`
 ou l'unit systemd du gateway), ou dans `config.yaml` sous `platforms.hasan_delivery.extra`
 (voir le docstring en tête d'[`adapter.py`](adapter.py) pour l'exemple complet).

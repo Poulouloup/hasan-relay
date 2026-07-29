@@ -131,3 +131,69 @@ def test_list_devices_returns_one_per_distinct_device_hash():
 
     devices = manager.list_devices()
     assert {d.device_hash for d in devices} == {"device-a", "device-b"}
+
+
+# ─────────────────────────── Session.fcm_token / update_fcm_token ───────────
+
+
+def test_session_fcm_token_roundtrip():
+    session = Session(
+        token="t1", device_hash="h1", created_at=1.0, last_seen_at=1.0,
+        fcm_token="fake-fcm-token-abc",
+    )
+    restored = Session.from_dict(session.to_dict())
+    assert restored is not None
+    assert restored.fcm_token == "fake-fcm-token-abc"
+
+
+def test_session_from_dict_missing_fcm_token_defaults_none():
+    """Rétrocompatibilité : une session persistée avant l'ajout du champ
+    fcm_token doit se recharger sans erreur, avec fcm_token=None."""
+    old_format = {
+        "token": "t1",
+        "device_hash": "h1",
+        "created_at": 1.0,
+        "last_seen_at": 1.0,
+        "refresh_token_hash": None,
+        "refresh_expires_at": None,
+        "capabilities": None,
+        "device_label": None,
+        # pas de clé "fcm_token" du tout
+    }
+    session = Session.from_dict(old_format)
+    assert session is not None
+    assert session.fcm_token is None
+
+
+def test_update_fcm_token_returns_true_on_first_change():
+    manager = PairingManager(sessions_path=None)
+    result = manager.redeem(manager.create_pairing_code(), "d" * 64)
+    device_hash = result.session.device_hash
+
+    changed = manager.update_fcm_token(device_hash, "fcm-token-1")
+    assert changed is True
+
+
+def test_update_fcm_token_returns_false_when_unchanged():
+    manager = PairingManager(sessions_path=None)
+    result = manager.redeem(manager.create_pairing_code(), "e" * 64)
+    device_hash = result.session.device_hash
+
+    assert manager.update_fcm_token(device_hash, "fcm-token-1") is True
+    assert manager.update_fcm_token(device_hash, "fcm-token-1") is False
+
+
+def test_update_fcm_token_accepts_none_for_deregistration():
+    manager = PairingManager(sessions_path=None)
+    result = manager.redeem(manager.create_pairing_code(), "f" * 64)
+    device_hash = result.session.device_hash
+
+    assert manager.update_fcm_token(device_hash, "fcm-token-1") is True
+    assert manager.update_fcm_token(device_hash, None) is True
+    assert manager.get_session_by_device_hash(device_hash).fcm_token is None
+
+
+def test_update_fcm_token_returns_false_for_unknown_device():
+    manager = PairingManager(sessions_path=None)
+    changed = manager.update_fcm_token("nonexistent", "some-token")
+    assert changed is False

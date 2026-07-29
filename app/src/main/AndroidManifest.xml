@@ -80,6 +80,19 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- Réveil FCM data-only des notifications proactives, app fermée —
+             voir HasanFirebaseMessagingService et docs/ARCHITECTURE.md. Pas
+             de foreground service (contrainte batterie explicite du
+             projet) : Google réveille brièvement ce service, qui va chercher
+             le vrai contenu via HTTP sur le relay auto-hébergé. -->
+        <service
+            android:name=".network.HasanFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Ouverture locale des fichiers téléchargés depuis hermes-webui
              (share_file) — le lien Markdown pointe vers un serveur TLS
              auto-signé TOFU qu'un navigateur externe ne connaît pas, donc

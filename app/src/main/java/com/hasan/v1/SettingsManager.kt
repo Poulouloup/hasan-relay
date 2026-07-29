@@ -294,6 +294,16 @@ class SettingsManager(context: Context) {
             }
         }
 
+    /**
+     * Token FCM courant transmis au relay (voir POST /fcm-token côté serveur,
+     * server/relay/pairing.py Session.fcm_token) — permet un réveil data-only
+     * de l'app quand elle n'a pas de WebSocket actif. null si FCM indisponible
+     * sur ce device (pas de Google Play Services) ou pas encore obtenu.
+     */
+    var relayFcmToken: String?
+        get() = encryptedPrefs.getString("relay_fcm_token", null)
+        set(value) = encryptedPrefs.edit().putString("relay_fcm_token", value).apply()
+
     // ─────────────────────── hermes-webui (chat REST/SSE) ───────────────────────
 
     /** URL de base hermes-webui (ex: "https://34.155.193.170"), distincte de [relayServerUrl] — voir com.hasan.v1.webui. */

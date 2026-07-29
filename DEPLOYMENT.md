@@ -125,6 +125,38 @@ curl https://relay.example.com/health
 curl https://relay.example.com/version
 ```
 
+**FCM wake-up for proactive notifications (optional)** — lets the app
+receive Hermes-initiated notifications even while fully closed, without a
+permanently running background service. Skip this if you're fine only
+receiving proactive notifications while the app has an active WebSocket
+connection (foreground or recent background) — the relay works identically
+without it, just without the wake-up accelerator when the device is
+offline/asleep.
+
+1. From the same Firebase project used for `app/google-services.json` (see
+   `SETUP.md` §4) — Firebase console → ⚙️ Project Settings → **Service
+   accounts** tab → **Generate new private key**. This downloads a JSON
+   file; it's a real secret (equivalent to a password), never commit it.
+2. Copy it to the server, outside the git checkout, e.g.:
+   ```bash
+   sudo mkdir -p /etc/hermes-relay
+   sudo cp fcm-service-account.json /etc/hermes-relay/fcm-service-account.json
+   sudo chown hasanrelay:hasanrelay /etc/hermes-relay/fcm-service-account.json
+   sudo chmod 600 /etc/hermes-relay/fcm-service-account.json
+   ```
+   (adjust the owner to whichever unprivileged user `install-relay.sh`
+   created for the `hermes-relay` service — same user that owns
+   `~/.hermes/hasan-relay-sessions.json`.)
+3. Add `RELAY_FCM_CREDENTIALS_PATH` to the same systemd unit as
+   `RELAY_ADMIN_TOKEN`:
+   ```
+   Environment=RELAY_FCM_CREDENTIALS_PATH=/etc/hermes-relay/fcm-service-account.json
+   ```
+   then `sudo systemctl restart hermes-relay`. If the path is missing or the
+   file is invalid, the relay logs a warning and starts normally anyway —
+   proactive notifications keep working via WebSocket, just without the FCM
+   wake-up accelerator.
+
 ### 2 — Install the `hasan_delivery` plugin
 
 On the same server (or wherever your Hermes gateway process runs):

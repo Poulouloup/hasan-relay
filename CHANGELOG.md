@@ -7,6 +7,26 @@ montre déjà le quoi).
 ## [Unreleased]
 
 ### Added
+- Réveil FCM (Firebase Cloud Messaging) data-only pour les notifications
+  proactives — le canal `proactive` existant (WebSocket persistant) ne
+  survit pas de façon fiable quand l'app est fermée/en veille (pas de
+  foreground service dédié, l'utilisateur a explicitement refusé d'en
+  ajouter un second — le service wake word consomme déjà trop de batterie
+  avec son WakeLock + inférence ONNX continue). FCM est la seule solution
+  Android pour un réveil externe sans rien faire tourner en continu.
+  Payload strictement `{"type": "wake"}` — Google ne voit jamais le texte
+  du message, seulement un signal opaque ; le contenu réel est récupéré
+  ensuite via `GET /phone/pending` (nouveau, HTTP privé TLS vers le relay
+  de l'utilisateur). Nouveau champ `Session.fcm_token`
+  (`server/relay/pairing.py`), nouvel endpoint `POST /fcm-token`, nouveau
+  `HasanFirebaseMessagingService` côté app (réutilise l'affichage de
+  notification déjà écrit mais jamais branché pour ce canal — extrait dans
+  `ProactiveNotifier` pour être partagé avec le chemin WS existant).
+  Entièrement optionnel et dégradé gracieusement : sans
+  `RELAY_FCM_CREDENTIALS_PATH` configuré côté serveur, comportement
+  identique à avant (WebSocket + push buffer uniquement). Voir
+  `docs/ARCHITECTURE.md` pour le flux complet et `SETUP.md`/`DEPLOYMENT.md`
+  pour la configuration Firebase.
 - `server/install-bridge.sh` — orchestrateur "une commande" pour le
   déploiement serveur du bridge Hasan (relay + Caddy en Docker Compose,
   `network_mode: host`, + plugin `hasan_delivery` côté Hermes existant).

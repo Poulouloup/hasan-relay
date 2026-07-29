@@ -82,6 +82,12 @@ class Session:
     # en cas d'ambiguïté multi-device) — jamais utilisé pour l'auth ou le
     # routage, qui restent basés sur device_hash.
     device_label: str | None = None
+    # Token FCM courant de ce device (opaque, réémis par Firebase à chaque
+    # rotation) — permet de réveiller l'app via un push data-only quand elle
+    # n'a pas de WS actif (Doze mode, app tuée). None si le device n'a jamais
+    # transmis de token (app pas encore mise à jour, ou FCM indisponible côté
+    # device — ex: build sans Google Play Services). Voir POST /fcm-token.
+    fcm_token: str | None = None
 
     def expired(self) -> bool:
         return time.time() - self.last_seen_at > SESSION_TOKEN_TTL_SECONDS
@@ -101,6 +107,7 @@ class Session:
             "refresh_expires_at": self.refresh_expires_at,
             "capabilities": self.capabilities,
             "device_label": self.device_label,
+            "fcm_token": self.fcm_token,
         }
 
     @staticmethod
@@ -115,6 +122,7 @@ class Session:
                 refresh_expires_at=data.get("refresh_expires_at"),
                 capabilities=data.get("capabilities"),
                 device_label=data.get("device_label"),
+                fcm_token=data.get("fcm_token"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -221,6 +229,24 @@ class PairingManager:
             return False
         session.capabilities = capabilities
         session.device_label = device_label
+        self._save_to_disk()
+        return True
+
+    def update_fcm_token(self, device_hash: str, fcm_token: str | None) -> bool:
+        """Persiste le token FCM courant de ce device (voir POST /fcm-token).
+        Retourne True si un changement réel a eu lieu — même pattern que
+        update_capabilities, évite une écriture disque à chaque appel
+        redondant (l'app resynchronise best-effort à chaque connexion WS,
+        voir HasanFirebaseMessagingService côté app). Pas de bump du
+        device_watch ici : le token FCM n'intéresse aucun watcher existant
+        (GET /devices/watch sert le function-calling cross-device, pas
+        la livraison de notifications proactives)."""
+        session = self.get_session_by_device_hash(device_hash)
+        if session is None:
+            return False
+        if session.fcm_token == fcm_token:
+            return False
+        session.fcm_token = fcm_token
         self._save_to_disk()
         return True
 

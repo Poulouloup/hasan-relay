@@ -8,6 +8,16 @@ plugins {
     id("org.owasp.dependencycheck")
 }
 
+// Le plugin google-services exige google-services.json (secret propre à
+// chaque projet Firebase, gitignored — voir SETUP.md §4) : appliqué
+// seulement s'il est présent, pour qu'un fork/clone sans Firebase configuré
+// continue de builder (notifications proactives fonctionnent quand même via
+// WS + push buffer, juste sans réveil FCM app fermée — dégradation gracieuse
+// cohérente avec le comportement serveur, voir server/relay/server.py).
+if (rootProject.file("app/google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) load(f.inputStream())
@@ -71,6 +81,14 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.activity)
     debugImplementation(libs.compose.ui.tooling)
+
+    // Firebase Cloud Messaging — réveil data-only pour les notifications
+    // proactives quand l'app n'a pas de WebSocket actif (app fermée/Doze).
+    // Payload strictement data-only (jamais de texte, voir
+    // HasanFirebaseMessagingService) : Google ne voit qu'un signal de
+    // réveil opaque, jamais le contenu — voir docs/ARCHITECTURE.md.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging.ktx)
 
     // ONNX Runtime — utilisé par openwakeword pour l'inférence wake word
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
