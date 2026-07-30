@@ -51,6 +51,7 @@ import com.hasan.v1.ui.theme.ChakraPetch
 import com.hasan.v1.ui.theme.HasanColors
 import com.hasan.v1.ui.theme.HasanDimens
 import com.hasan.v1.ui.theme.IBMPlexMono
+import com.hasan.v1.utils.TimeFormat
 import kotlinx.coroutines.launch
 
 enum class HasanNavTab { CHAT, TASKS, KANBAN, MEMORY, TOOLS, SETTINGS }
@@ -101,7 +102,9 @@ fun HasanMinimalHeader(onMenuClick: () -> Unit, modifier: Modifier = Modifier, t
 data class DrawerSessionItem(
     val id: String,
     val label: String,
-    val isActive: Boolean
+    val isActive: Boolean,
+    /** HermesSession.updatedAt — dernière activité, pour l'affichage "-1h"/"+3d"/... à droite du label. */
+    val lastMessageAt: Long
 )
 
 data class DrawerUiState(
@@ -349,7 +352,15 @@ private fun DrawerSessionRow(
                 fontSize = HasanDimens.TextBodyMedium,
                 modifier = Modifier.weight(1f)
             )
+            Text(
+                text = TimeFormat.formatRelativeSessionAge(session.lastMessageAt),
+                color = HasanColors.TextMutedA11y,
+                fontFamily = IBMPlexMono,
+                fontSize = HasanDimens.TextCaption,
+                modifier = Modifier.padding(start = HasanDimens.SpacingS)
+            )
             if (session.isActive) {
+                Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
                 Box(
                     modifier = Modifier
                         .size(6.dp)

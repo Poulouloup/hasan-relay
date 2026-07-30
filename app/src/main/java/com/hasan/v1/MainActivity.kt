@@ -291,7 +291,8 @@ class MainActivity : AppCompatActivity() {
             DrawerSessionItem(
                 id = session.id,
                 label = "${(index + 1).toString().padStart(2, '0')}. ${session.name}",
-                isActive = session.isActive
+                isActive = session.isActive,
+                lastMessageAt = session.updatedAt
             )
         }
         return DrawerUiState(
