@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.util.Log
 import com.hasan.v1.SettingsManager
+import com.hasan.v1.capabilitiesAnnouncementJson
 import com.hasan.v1.auth.CertPinStore
 import com.hasan.v1.auth.SessionTokenStore
 import com.hasan.v1.network.models.Envelope
@@ -64,25 +65,37 @@ class ConnectionManager(
     private fun certStorageKey(): String =
         CertPinStore.storageKeyFor("relay", RelayUrlDeriver.httpBaseUrl(settings.relayServerUrl))
 
-    private val tofuTrustManager = certPinStore.newTrustManager(certStorageKey())
+    // tofuTrustManager doit refléter le relayServerUrl COURANT, pas celui au moment de la
+    // construction de ConnectionManager (créé tôt dans MainViewModel.init, généralement
+    // avant tout pairing) — sinon un pairing (QR ou manuel) qui change relayServerUrl après
+    // coup se retrouve à négocier TLS avec le trust manager de l'ancienne URL (ou d'une URL
+    // vide au tout premier lancement), et la connexion échoue silencieusement. Recalculé à
+    // chaque ouverture de socket plutôt que mis en cache — coût négligeable (un appel par
+    // tentative de connexion, pas par frame).
+    private var tofuTrustManager = certPinStore.newTrustManager(certStorageKey())
 
-    private val sslContext = SSLContext.getInstance("TLS").apply {
-        init(null, arrayOf<TrustManager>(tofuTrustManager), java.security.SecureRandom())
+    private fun buildHttpClient(): OkHttpClient {
+        tofuTrustManager = certPinStore.newTrustManager(certStorageKey())
+        val sslContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf<TrustManager>(tofuTrustManager), java.security.SecureRandom())
+        }
+        return OkHttpClient.Builder()
+            .sslSocketFactory(sslContext.socketFactory, tofuTrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            // 30s s'est révélé trop agressif sur liaison mobile réelle : OkHttp exige un
+            // pong dans le même délai que l'intervalle de ping, et la moindre latence/gigue
+            // suffisait à déclencher onFailure ("didn't receive pong"), observé en pratique
+            // comme un cycle de reconnexion permanent toutes les 30-55s (voir latency.log).
+            // 45s (volontairement différent des 60s du heartbeat serveur, server.py
+            // handle_ws — désynchronisé pour éviter que les deux horloges de ping
+            // n'échouent au même instant) laisse une marge large sans retarder
+            // excessivement la détection d'une vraie coupure.
+            .pingInterval(45, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
     }
-
-    private val httpClient = OkHttpClient.Builder()
-        .sslSocketFactory(sslContext.socketFactory, tofuTrustManager)
-        .hostnameVerifier { _, _ -> true }
-        // 30s s'est révélé trop agressif sur liaison mobile réelle : OkHttp exige un
-        // pong dans le même délai que l'intervalle de ping, et la moindre latence/gigue
-        // suffisait à déclencher onFailure ("didn't receive pong"), observé en pratique
-        // comme un cycle de reconnexion permanent toutes les 30-55s (voir latency.log).
-        // 45s (volontairement différent des 60s du heartbeat serveur, server.py
-        // handle_ws — désynchronisé pour éviter que les deux horloges de ping
-        // n'échouent au même instant) laisse une marge large sans retarder
-        // excessivement la détection d'une vraie coupure.
-        .pingInterval(45, java.util.concurrent.TimeUnit.SECONDS)
-        .build()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var reconnectJob: Job? = null
@@ -224,7 +237,7 @@ class ConnectionManager(
         val url = RelayUrlDeriver.webSocketUrl(settings.relayServerUrl)
         val request = Request.Builder().url(url).build()
 
-        webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
+        webSocket = buildHttpClient().newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WS ouvert — envoi de l'authentification")
                 // Le token part dans le premier message applicatif, jamais dans l'URL
@@ -235,6 +248,34 @@ class ConnectionManager(
                     payload = JSONObject().apply { put("session_token", sessionToken) }
                 )
                 webSocket.send(authEnvelope.toString())
+
+                // Annonce le libellé + les capabilities activées+autorisées à chaque
+                // (re)connexion — le relay les persiste par device (voir
+                // server/relay/pairing.py Session.capabilities/device_label) et
+                // plugin/hasan_delivery/tools.py les récupère dynamiquement via
+                // GET /devices, plutôt que de dupliquer les schémas côté Python.
+                // Le libellé vient de settings.relayDeviceLabel (personnalisable
+                // dans Réglages), pas recalculé ici, pour rester stable entre
+                // reconnexions même si l'utilisateur l'a édité.
+                val capsEnvelope = Envelope(
+                    channel = "system",
+                    type = "capabilities",
+                    payload = JSONObject().apply {
+                        put("device_label", settings.relayDeviceLabel)
+                        put("capabilities", capabilitiesAnnouncementJson(context, settings))
+                    }
+                )
+                webSocket.send(capsEnvelope.toString())
+
+                // Filet de sécurité pour le token FCM (voir HasanFirebaseMessagingService) :
+                // resynchronise inconditionnellement à chaque connexion WS réussie, pas
+                // seulement à onNewToken()/post-pairing — couvre le cas où un token aurait
+                // été généré/persisté localement pendant que l'app était offline sans jamais
+                // avoir pu joindre POST /fcm-token (device sans réseau au moment de
+                // onNewToken()). Coût négligeable : requête HTTP légère, peu fréquente.
+                settings.relayFcmToken?.let { fcmToken ->
+                    scope.launch { syncFcmTokenToRelay(settings, fcmToken) }
+                }
 
                 attemptCount = 0
                 _connectionStatus.value = RelayConnectionStatus.CONNECTED

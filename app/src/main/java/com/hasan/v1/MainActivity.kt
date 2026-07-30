@@ -35,14 +35,14 @@ import com.hasan.v1.utils.HasanDialog
 import kotlinx.coroutines.launch
 
 /**
- * Activité racine — drawer Compose (menu tiroir) avec 3 onglets : Chat, Activité
- * et Réglages, plus la liste des sessions Hermes (étape 10, remplace la
- * BottomNavigation — voir reworkui.md).
+ * Activité racine — drawer Compose (menu tiroir) avec 6 onglets : Chat, Tâches,
+ * Skills, Mémoire, Tools et Réglages (voir [HasanNavTab]), plus la liste des
+ * sessions Hermes (étape 10, remplace la BottomNavigation — voir reworkui.md).
  *
  * Responsabilités :
  *  - Orchestration du drawer (ouverture/fermeture, seul endroit autorisé par
  *    .claude/rules/architecture.md — "Drawer latéral géré par MainActivity")
- *  - Swap de fragments (ChatFragment ↔ ActivityFragment ↔ SettingsFragment)
+ *  - Swap de fragments (ChatFragment ↔ ToolsPermissionsFragment ↔ SettingsFragment)
  *  - Démarrage du service wake word si activé
  *  - Expose le ViewModel partagé aux fragments via activityViewModels()
  */
@@ -51,16 +51,23 @@ class MainActivity : AppCompatActivity() {
     val viewModel: MainViewModel by viewModels()
 
     private lateinit var chatFragment: ConversationFragment
-    private lateinit var activityFragment: ActivityFragment
+    private lateinit var tasksFragment: TasksFragment
+    private lateinit var kanbanFragment: KanbanFragment
+    private lateinit var memoryFragment: MemoryFragment
+    private lateinit var toolsPermissionsFragment: ToolsPermissionsFragment
     private lateinit var settingsFragment: SettingsFragment
     private var lightModeFragment: LightModeFragment? = null
-    private var toolsPermissionsFragment: ToolsPermissionsFragment? = null
+    private var logsFragment: ActivityFragment? = null
+    private var filesFragment: FilesFragment? = null
 
     private var selectedNavTab by mutableStateOf(HasanNavTab.CHAT)
     private var fragmentContainerRoot: View? = null
 
     /** Piloté depuis openDrawer() — fermé/ouvert par le Composable via son propre DrawerState. */
     private var requestOpenDrawer by mutableStateOf(false)
+
+    /** Piloté depuis confirmQuit() — affiche HasanConfirmOverlay par-dessus tout l'écran. */
+    private var showQuitConfirm by mutableStateOf(false)
 
     private val requestNotifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -72,6 +79,9 @@ class MainActivity : AppCompatActivity() {
         if (result.resultCode == RESULT_OK) {
             val text = result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_TEXT)
             if (!text.isNullOrBlank()) viewModel.pairFromQr(text)
+        } else {
+            val reason = result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_ERROR)
+            viewModel.reportQrScanError(reason)
         }
     }
 
@@ -88,6 +98,17 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // targetSdk 35 force l'edge-to-edge par défaut (Android 15+) : le
+        // contenu Compose est dessiné SOUS la status bar système, qui reste
+        // au-dessus en z-order et absorbe les taps destinés au header
+        // applicatif (bouton Menu notamment) sans que l'app ne gère les
+        // WindowInsets pour repositionner son contenu. Plutôt que de
+        // cantonner le contenu sous la status bar, on la masque
+        // complètement (mode immersif) tant que l'app est au premier plan —
+        // cohérent avec l'absence d'UI système utile ici (pas de barre de
+        // notifications à surveiller pendant l'usage de l'app).
+        hideSystemBars()
+
         // Redirige vers l'onboarding au premier lancement
         if (!viewModel.settings.onboardingCompleted) {
             startActivity(Intent(this, OnboardingActivity::class.java))
@@ -98,13 +119,68 @@ class MainActivity : AppCompatActivity() {
         setupFragments(savedInstanceState)
         setupDrawerRoot()
 
-        // Démarre le service wake word si activé dans les préférences
-        if (viewModel.settings.wakeWordEnabled) {
-            startForegroundService(Intent(this, HassanWakeWordService::class.java))
+        // Démarre le service wake word si activé dans les préférences ET si RECORD_AUDIO
+        // est réellement accordée — les deux sont découplés (préférence utilisateur vs état
+        // système), et targetSdk 35 lève une SecurityException NON rattrapable par ce
+        // try/catch : startForegroundService() est asynchrone, l'exception survient plus tard
+        // dans HassanWakeWordService.onCreate() (Service.startForeground() avec
+        // FOREGROUND_SERVICE_TYPE_MICROPHONE sans RECORD_AUDIO), sur un thread hors de portée
+        // de ce bloc — observé en crash direct au démarrage après une réinstallation où la
+        // permission n'avait pas encore été (re)accordée.
+        val hasRecordAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (viewModel.settings.wakeWordEnabled && hasRecordAudio) {
+            try {
+                startForegroundService(Intent(this, HassanWakeWordService::class.java))
+            } catch (e: Exception) {
+                // ForegroundServiceStartNotAllowedException (API 31+) — le système peut
+                // encore refuser le démarrage pour d'autres raisons (app en arrière-plan,
+                // restrictions batterie, etc.) ; ne doit jamais faire planter onCreate().
+                android.util.Log.w("MainActivity", "Démarrage du service wake word refusé par le système", e)
+            }
+        } else if (viewModel.settings.wakeWordEnabled) {
+            android.util.Log.w("MainActivity", "Wake word activé mais RECORD_AUDIO non accordée — service non démarré")
         }
 
         requestNotifPermissionIfNeeded()
-        startForegroundService(Intent(this, HassanNotificationService::class.java))
+    }
+
+    override fun onResume() {
+        super.onResume()
+        hideSystemBars()
+    }
+
+    /**
+     * launchMode="singleTask" (AndroidManifest.xml) route ici tout relaunch d'une
+     * instance déjà en Task (notification wake word retapée, icône du launcher,
+     * etc.) au lieu de créer une deuxième instance de MainActivity empilée dans la
+     * même Task — c'était le bug derrière l'écran noir après "Quitter" : la
+     * deuxième instance masquait la première, jamais mise à jour, et
+     * finishAndRemoveTask() ne fermait que le sommet de la pile, révélant en
+     * dessous une Activity dans un état non rafraîchi (ComposeView sans contenu
+     * valide).
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Le mode immersif "sticky" se désactive automatiquement quand une
+        // fenêtre système (dialog de permission, sélecteur, clavier...)
+        // reprend le focus — on le réapplique dès qu'on le regagne, sinon
+        // la status bar reste visible en permanence après la première
+        // interaction système (RECORD_AUDIO, notifications, etc.).
+        if (hasFocus) hideSystemBars()
+    }
+
+    /** Masque la status bar (mode immersif sticky) — voir le commentaire dans onCreate(). */
+    private fun hideSystemBars() {
+        val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+        controller.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
+        controller.systemBarsBehavior =
+            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
     private fun requestNotifPermissionIfNeeded() {
@@ -121,14 +197,23 @@ class MainActivity : AppCompatActivity() {
     private fun setupFragments(savedInstanceState: Bundle?) {
         if (savedInstanceState == null) {
             chatFragment = ConversationFragment()
-            activityFragment = ActivityFragment()
+            tasksFragment = TasksFragment()
+            kanbanFragment = KanbanFragment()
+            memoryFragment = MemoryFragment()
+            toolsPermissionsFragment = ToolsPermissionsFragment()
             settingsFragment = SettingsFragment()
         } else {
             // Récupère les fragments existants après rotation
             chatFragment = supportFragmentManager.findFragmentByTag(TAG_CHAT) as? ConversationFragment
                 ?: ConversationFragment()
-            activityFragment = supportFragmentManager.findFragmentByTag(TAG_ACTIVITY) as? ActivityFragment
-                ?: ActivityFragment()
+            tasksFragment = supportFragmentManager.findFragmentByTag(TAG_TASKS) as? TasksFragment
+                ?: TasksFragment()
+            kanbanFragment = supportFragmentManager.findFragmentByTag(TAG_KANBAN) as? KanbanFragment
+                ?: KanbanFragment()
+            memoryFragment = supportFragmentManager.findFragmentByTag(TAG_MEMORY) as? MemoryFragment
+                ?: MemoryFragment()
+            toolsPermissionsFragment = supportFragmentManager.findFragmentByTag(TAG_TOOLS_PERMISSIONS) as? ToolsPermissionsFragment
+                ?: ToolsPermissionsFragment()
             settingsFragment = supportFragmentManager.findFragmentByTag(TAG_SETTINGS) as? SettingsFragment
                 ?: SettingsFragment()
         }
@@ -140,9 +225,15 @@ class MainActivity : AppCompatActivity() {
         if (supportFragmentManager.findFragmentByTag(TAG_CHAT) != null) return
         supportFragmentManager.beginTransaction()
             .add(R.id.fragmentContainer, chatFragment, TAG_CHAT)
-            .add(R.id.fragmentContainer, activityFragment, TAG_ACTIVITY)
+            .add(R.id.fragmentContainer, tasksFragment, TAG_TASKS)
+            .add(R.id.fragmentContainer, kanbanFragment, TAG_KANBAN)
+            .add(R.id.fragmentContainer, memoryFragment, TAG_MEMORY)
+            .add(R.id.fragmentContainer, toolsPermissionsFragment, TAG_TOOLS_PERMISSIONS)
             .add(R.id.fragmentContainer, settingsFragment, TAG_SETTINGS)
-            .hide(activityFragment)
+            .hide(tasksFragment)
+            .hide(kanbanFragment)
+            .hide(memoryFragment)
+            .hide(toolsPermissionsFragment)
             .hide(settingsFragment)
             .commit()
     }
@@ -163,20 +254,33 @@ class MainActivity : AppCompatActivity() {
                     scope.launch { drawerState.open() }
                 }
 
-                HasanDrawerScaffold(
-                    state = buildDrawerState(sessions),
-                    callbacks = buildDrawerCallbacks(scope) { scope.launch { drawerState.close() } },
-                    drawerState = drawerState
-                ) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            LayoutInflater.from(ctx).inflate(R.layout.content_fragment_container, null).also {
-                                fragmentContainerRoot = it
-                                attachFragmentsIfNeeded(it)
+                androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
+                    HasanDrawerScaffold(
+                        state = buildDrawerState(sessions),
+                        callbacks = buildDrawerCallbacks(scope) { scope.launch { drawerState.close() } },
+                        drawerState = drawerState
+                    ) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { ctx ->
+                                LayoutInflater.from(ctx).inflate(R.layout.content_fragment_container, null).also {
+                                    fragmentContainerRoot = it
+                                    attachFragmentsIfNeeded(it)
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
+
+                    if (showQuitConfirm) {
+                        com.hasan.v1.ui.components.HasanConfirmOverlay(
+                            message = getString(R.string.settings_quit_confirm),
+                            confirmLabel = getString(R.string.dialog_confirm),
+                            cancelLabel = getString(R.string.dialog_cancel),
+                            destructive = true,
+                            onConfirm = { showQuitConfirm = false; quitApp() },
+                            onCancel = { showQuitConfirm = false }
+                        )
+                    }
                 }
             }
         }
@@ -187,13 +291,17 @@ class MainActivity : AppCompatActivity() {
             DrawerSessionItem(
                 id = session.id,
                 label = "${(index + 1).toString().padStart(2, '0')}. ${session.name}",
-                isActive = session.isActive
+                isActive = session.isActive,
+                lastMessageAt = session.updatedAt
             )
         }
         return DrawerUiState(
             navItems = listOf(
                 HasanNavItem(HasanNavTab.CHAT, R.drawable.ic_chat_nav, getString(R.string.nav_chat)),
-                HasanNavItem(HasanNavTab.ACTIVITY, R.drawable.ic_activity_nav, getString(R.string.nav_activity)),
+                HasanNavItem(HasanNavTab.TASKS, R.drawable.ic_tasks_nav, getString(R.string.nav_tasks)),
+                HasanNavItem(HasanNavTab.KANBAN, R.drawable.ic_kanban_nav, getString(R.string.nav_kanban)),
+                HasanNavItem(HasanNavTab.MEMORY, R.drawable.ic_mcp_nav, getString(R.string.nav_memory)),
+                HasanNavItem(HasanNavTab.TOOLS, R.drawable.ic_tools_nav, getString(R.string.nav_tools)),
                 HasanNavItem(HasanNavTab.SETTINGS, R.drawable.ic_settings_nav, getString(R.string.nav_settings))
             ),
             selectedTab = selectedNavTab,
@@ -253,7 +361,10 @@ class MainActivity : AppCompatActivity() {
         selectedNavTab = tab
         when (tab) {
             HasanNavTab.CHAT -> showFragment(chatFragment)
-            HasanNavTab.ACTIVITY -> showFragment(activityFragment)
+            HasanNavTab.TASKS -> showFragment(tasksFragment)
+            HasanNavTab.KANBAN -> showFragment(kanbanFragment)
+            HasanNavTab.MEMORY -> showFragment(memoryFragment)
+            HasanNavTab.TOOLS -> showFragment(toolsPermissionsFragment)
             HasanNavTab.SETTINGS -> showFragment(settingsFragment)
         }
     }
@@ -266,7 +377,7 @@ class MainActivity : AppCompatActivity() {
             focused.clearFocus()
         }
         val transaction = supportFragmentManager.beginTransaction()
-        listOf(chatFragment, activityFragment, settingsFragment).forEach { transaction.hide(it) }
+        listOf(chatFragment, tasksFragment, kanbanFragment, memoryFragment, toolsPermissionsFragment, settingsFragment).forEach { transaction.hide(it) }
         transaction.show(fragment).commit()
     }
 
@@ -275,28 +386,33 @@ class MainActivity : AppCompatActivity() {
     /**
      * Extrait de l'ancien SettingsFragment.confirmQuit() — vit ici car kill process
      * et arrêt de services sont des opérations Activity, pas ViewModel/Fragment.
+     * Affiche HasanConfirmOverlay (Compose, DA de l'app) plutôt qu'un AlertDialog
+     * système — voir showQuitConfirm dans setupDrawerRoot().
      */
     fun confirmQuit() {
-        HasanDialog.confirm(
-            context = this,
-            message = getString(R.string.settings_quit_confirm),
-            confirmLabel = getString(R.string.dialog_confirm),
-            cancelLabel = getString(R.string.dialog_cancel),
-            onConfirm = {
-                viewModel.stopTts()
+        showQuitConfirm = true
+    }
 
-                // Annule la notification persistante immédiatement — les ACTION_STOP
-                // sont asynchrones et killProcess() peut intervenir avant leur traitement.
-                val nm = getSystemService(android.app.NotificationManager::class.java)
-                nm.cancelAll()
+    private fun quitApp() {
+        viewModel.stopTts()
 
-                stopService(Intent(this, HassanWakeWordService::class.java))
-                stopService(Intent(this, HassanNotificationService::class.java))
+        // Annule la notification persistante immédiatement — l'arrêt du service
+        // est asynchrone et killProcess() peut intervenir avant son traitement.
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        nm.cancelAll()
 
-                finishAndRemoveTask()
-                android.os.Process.killProcess(android.os.Process.myPid())
-            }
-        )
+        // ACTION_STOP (pas stopService() brut) : le service retourne explicitement
+        // START_NOT_STICKY après stopForeground(STOP_FOREGROUND_REMOVE). stopService()
+        // seul se contente de poster une demande d'arrêt asynchrone — si killProcess()
+        // intervient avant qu'Android l'ait traitée, le système peut interpréter la mort
+        // du process comme un kill mémoire externe et relancer le service en
+        // START_STICKY, laissant le wake word actif en tâche de fond malgré "Quitter".
+        startService(Intent(this, HassanWakeWordService::class.java).apply {
+            action = HassanWakeWordService.ACTION_STOP
+        })
+
+        finishAndRemoveTask()
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     // ─────────────────────────── Mode Light ─────────────────────────────────
@@ -307,7 +423,10 @@ class MainActivity : AppCompatActivity() {
         supportFragmentManager.beginTransaction()
             .add(R.id.fragmentContainer, fragment, TAG_LIGHT)
             .hide(chatFragment)
-            .hide(activityFragment)
+            .hide(tasksFragment)
+            .hide(kanbanFragment)
+            .hide(memoryFragment)
+            .hide(toolsPermissionsFragment)
             .hide(settingsFragment)
             .commit()
     }
@@ -323,40 +442,82 @@ class MainActivity : AppCompatActivity() {
         selectedNavTab = HasanNavTab.CHAT
     }
 
-    // ─────────────────────────── Tools & Permissions ────────────────────────
+    // ─────────────────────────── Logs ────────────────────────────────────────
 
     /**
-     * Affiche l'écran "Tools & Permissions" en overlay plein écran par-dessus les 3
-     * fragments principaux — même pattern que enterLightMode()/exitLightMode() ci-dessus.
-     * Appelé depuis SettingsScreen (SettingsRow "Tools & Permissions →").
+     * Affiche l'écran "Logs" en overlay plein écran par-dessus les fragments
+     * principaux — même pattern que enterLightMode()/exitLightMode() ci-dessus.
+     * Appelé depuis SettingsScreen (SettingsRow "Logs →") — pas d'onglet dédié
+     * dans la sidebar, pour ne pas la charger avec un usage occasionnel/diagnostic.
      */
-    fun openToolsPermissions() {
-        val fragment = ToolsPermissionsFragment()
-        toolsPermissionsFragment = fragment
+    fun openLogs() {
+        val fragment = ActivityFragment()
+        logsFragment = fragment
         supportFragmentManager.beginTransaction()
-            .add(R.id.fragmentContainer, fragment, TAG_TOOLS_PERMISSIONS)
+            .add(R.id.fragmentContainer, fragment, TAG_LOGS)
             .hide(chatFragment)
-            .hide(activityFragment)
+            .hide(tasksFragment)
+            .hide(kanbanFragment)
+            .hide(memoryFragment)
+            .hide(toolsPermissionsFragment)
             .hide(settingsFragment)
             .commit()
     }
 
-    fun closeToolsPermissions() {
-        toolsPermissionsFragment?.let { frag ->
+    fun closeLogs() {
+        logsFragment?.let { frag ->
             supportFragmentManager.beginTransaction()
                 .remove(frag)
                 .show(settingsFragment)
                 .commit()
-            toolsPermissionsFragment = null
+            logsFragment = null
         }
         selectedNavTab = HasanNavTab.SETTINGS
     }
 
+    // ─────────────────────────── Fichiers ──────────────────────────────────────
+
+    /**
+     * Affiche l'écran "Fichiers" (workspace hermes-webui, partagé entre
+     * sessions dans la config par défaut — voir docs/ARCHITECTURE.md#fichiers)
+     * en overlay plein écran — même pattern que openLogs()/closeLogs() : usage
+     * occasionnel, pas d'onglet dédié dans la sidebar. Ouvert depuis le
+     * bouton flottant de ChatScreen (haut droit, sous le header).
+     */
+    fun openFiles() {
+        val fragment = FilesFragment()
+        filesFragment = fragment
+        supportFragmentManager.beginTransaction()
+            .add(R.id.fragmentContainer, fragment, TAG_FILES)
+            .hide(chatFragment)
+            .hide(tasksFragment)
+            .hide(kanbanFragment)
+            .hide(memoryFragment)
+            .hide(toolsPermissionsFragment)
+            .hide(settingsFragment)
+            .commit()
+    }
+
+    fun closeFiles() {
+        filesFragment?.let { frag ->
+            supportFragmentManager.beginTransaction()
+                .remove(frag)
+                .show(chatFragment)
+                .commit()
+            filesFragment = null
+        }
+        selectedNavTab = HasanNavTab.CHAT
+    }
+
     companion object {
         private const val TAG_CHAT     = "chat_fragment"
-        private const val TAG_ACTIVITY = "activity_fragment"
+        private const val TAG_TASKS    = "tasks_fragment"
+        private const val TAG_KANBAN   = "kanban_fragment"
+        private const val TAG_FILES    = "files_fragment"
+        private const val TAG_MEMORY   = "memory_fragment"
         private const val TAG_SETTINGS = "settings_fragment"
         private const val TAG_LIGHT    = "light_fragment"
         private const val TAG_TOOLS_PERMISSIONS = "tools_permissions_fragment"
+        private const val TAG_LOGS = "logs_fragment"
     }
 }

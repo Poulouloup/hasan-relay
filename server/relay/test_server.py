@@ -113,6 +113,37 @@ async def test_pairing_create_includes_relay_url_when_configured(aiohttp_client)
     assert body["relay_url"] == "https://relay.example.com:8767"
 
 
+async def test_pairing_create_omits_webui_fields_when_not_configured(client):
+    """Sans WEBUI_URL/WEBUI_PASSWORD, le QR reste un QR bridge valide sans configurer le chat."""
+    resp = await client.post("/pairing/create", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    body = await resp.json()
+    assert "webui_url" not in body
+    assert "webui_password" not in body
+
+
+async def test_pairing_create_includes_webui_fields_when_both_configured(aiohttp_client):
+    app = server.create_app(
+        admin_token=ADMIN_TOKEN,
+        webui_url="https://34.155.193.170",
+        webui_password="test-webui-secret",
+    )
+    c = await aiohttp_client(app)
+    resp = await c.post("/pairing/create", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    body = await resp.json()
+    assert body["webui_url"] == "https://34.155.193.170"
+    assert body["webui_password"] == "test-webui-secret"
+
+
+async def test_pairing_create_omits_webui_fields_when_only_one_configured(aiohttp_client):
+    """webui_url et webui_password sont les deux ou aucun — jamais un QR à moitié configuré."""
+    app = server.create_app(admin_token=ADMIN_TOKEN, webui_url="https://34.155.193.170")
+    c = await aiohttp_client(app)
+    resp = await c.post("/pairing/create", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    body = await resp.json()
+    assert "webui_url" not in body
+    assert "webui_password" not in body
+
+
 async def test_pairing_register_with_bad_code(client):
     resp = await client.post(
         "/pairing/register", json={"code": "NOPE00", "device_hash": make_device_hash("x")}
@@ -553,37 +584,77 @@ def test_envelope_invalid_channel_raises():
 
 
 # ─────────────────────────── Bridge commands (capabilities) ───────────────────────────
+#
+# Auth admin_token (pas session_token) depuis le passage au multi-device —
+# /bridge/command cible désormais un device_id explicite dans le corps de la
+# requête, le plugin agit comme un opérateur de confiance cross-device (même
+# modèle que /pairing/create et /devices). Voir CHANGELOG pour le contexte.
 
 
-async def test_bridge_command_requires_auth(client):
-    resp = await client.post("/bridge/command", json={"capability": "get_battery"})
+async def test_bridge_command_requires_admin_token(client):
+    resp = await client.post("/bridge/command", json={"device_id": "x", "capability": "get_battery"})
     assert resp.status == 401
 
 
-async def test_bridge_command_missing_capability(paired_client):
-    client, token, _ = paired_client
+async def test_bridge_command_rejects_session_token(paired_client):
+    """Garde-fou de régression pour la bascule d'auth : un session_token (valide
+    pour son propre device) ne doit PLUS donner accès à /bridge/command."""
+    client, token, device_hash = paired_client
     resp = await client.post(
         "/bridge/command",
-        json={"params": {}},
+        json={"device_id": device_hash, "capability": "get_battery", "params": {}},
         headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status == 401
+
+
+async def test_bridge_command_missing_device_id(client):
+    resp = await client.post(
+        "/bridge/command",
+        json={"capability": "get_battery", "params": {}},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert body["error"] == "missing_device_id"
+
+
+async def test_bridge_command_missing_capability(paired_client):
+    client, _token, device_hash = paired_client
+    resp = await client.post(
+        "/bridge/command",
+        json={"device_id": device_hash, "params": {}},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
     )
     assert resp.status == 400
 
 
 async def test_bridge_command_device_not_connected(paired_client):
-    """Session valide mais aucun WS actif pour ce device — pas de tunnel vers le téléphone."""
-    client, token, _ = paired_client
+    """Device appairé mais aucun WS actif — pas de tunnel vers le téléphone."""
+    client, _token, device_hash = paired_client
     resp = await client.post(
         "/bridge/command",
-        json={"capability": "get_battery", "params": {}},
-        headers={"Authorization": f"Bearer {token}"},
+        json={"device_id": device_hash, "capability": "get_battery", "params": {}},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    )
+    assert resp.status == 503
+
+
+async def test_bridge_command_unknown_device_id(paired_client):
+    """device_id qui ne correspond à aucun device connecté — même erreur que non-connecté."""
+    client, token, _device_hash = paired_client
+    await connect_and_auth(client, token)  # un device connecté, mais pas celui ciblé
+    resp = await client.post(
+        "/bridge/command",
+        json={"device_id": "unknown-device-hash", "capability": "get_battery", "params": {}},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
     )
     assert resp.status == 503
 
 
 async def test_bridge_command_round_trip(paired_client):
     """Le device (WS) reçoit la commande, répond via bridge/command_result — /bridge/command la retourne."""
-    client, token, _ = paired_client
+    client, token, device_hash = paired_client
     ws = await connect_and_auth(client, token)
 
     import asyncio
@@ -602,8 +673,8 @@ async def test_bridge_command_round_trip(paired_client):
     responder = asyncio.create_task(respond_once())
     resp = await client.post(
         "/bridge/command",
-        json={"capability": "get_battery", "params": {}},
-        headers={"Authorization": f"Bearer {token}"},
+        json={"device_id": device_hash, "capability": "get_battery", "params": {}},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
     )
     await responder
 
@@ -631,8 +702,338 @@ async def test_bridge_command_timeout_when_device_silent(aiohttp_client):
 
     resp = await client.post(
         "/bridge/command",
-        json={"capability": "get_battery", "params": {}},
-        headers={"Authorization": f"Bearer {token}"},
+        json={"device_id": device_hash, "capability": "get_battery", "params": {}},
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
     )
     assert resp.status == 504
+    await ws.close()
+
+
+# ─────────────────────────── Multi-device (GET /devices, /devices/watch) ──
+
+
+async def send_capabilities(ws, capabilities: list, device_label=None) -> None:
+    payload = {"capabilities": capabilities}
+    if device_label is not None:
+        payload["device_label"] = device_label
+    await ws.send_json({
+        "version": 1, "channel": "system", "type": "capabilities", "id": "c1",
+        "payload": payload,
+    })
+
+
+async def test_get_devices_requires_admin_token(paired_client):
+    client, _token, _device_hash = paired_client
+    resp = await client.get("/devices")
+    assert resp.status == 401
+    resp = await client.get("/devices", headers={"Authorization": "Bearer wrong"})
+    assert resp.status == 401
+
+
+async def test_get_devices_disabled_without_admin_token(aiohttp_client):
+    app = server.create_app(admin_token="")
+    client = await aiohttp_client(app)
+    resp = await client.get("/devices", headers={"Authorization": "Bearer whatever"})
+    assert resp.status == 503
+
+
+async def test_get_devices_empty_when_no_sessions(client):
+    resp = await client.get("/devices", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {"devices": []}
+
+
+async def test_get_devices_reflects_connected_state_and_capabilities(paired_client):
+    client, token, device_hash = paired_client
+    ws = await connect_and_auth(client, token)
+
+    caps = [{"name": "get_battery", "description": "batterie", "parameters": {"type": "object", "properties": {}, "required": []}}]
+    await send_capabilities(ws, caps, device_label="Pixel de test")
+    # Laisse le temps au serveur de traiter le message avant de lire l'état.
+    await ws.send_json({"version": 1, "channel": "system", "type": "ping", "payload": {}})
+    await ws.receive_json()  # pong — garantit que capabilities a bien été dispatché avant
+
+    resp = await client.get("/devices", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    body = await resp.json()
+    assert len(body["devices"]) == 1
+    device = body["devices"][0]
+    assert device["device_id"] == device_hash
+    assert device["label"] == "Pixel de test"
+    assert device["connected"] is True
+    assert device["capabilities"] == caps
+
+    await ws.close()
+    resp = await client.get("/devices", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    body = await resp.json()
+    # Le device reste listé (session persistée) mais n'est plus connecté.
+    assert body["devices"][0]["connected"] is False
+
+
+async def test_get_devices_lists_multiple_devices(client):
+    """Deux devices distincts appairés séparément apparaissent tous les deux."""
+    resp = await client.post("/pairing/create", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    code_a = (await resp.json())["code"]
+    hash_a = make_device_hash("device-a")
+    resp = await client.post("/pairing/register", json={"code": code_a, "device_hash": hash_a})
+    token_a = (await resp.json())["session_token"]
+
+    resp = await client.post("/pairing/create", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    code_b = (await resp.json())["code"]
+    hash_b = make_device_hash("device-b")
+    resp = await client.post("/pairing/register", json={"code": code_b, "device_hash": hash_b})
+    token_b = (await resp.json())["session_token"]
+
+    ws_a = await connect_and_auth(client, token_a)
+    ws_b = await connect_and_auth(client, token_b)
+
+    resp = await client.get("/devices", headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    body = await resp.json()
+    device_ids = {d["device_id"] for d in body["devices"]}
+    assert device_ids == {hash_a, hash_b}
+    assert all(d["connected"] for d in body["devices"])
+
+    await ws_a.close()
+    await ws_b.close()
+
+
+async def test_devices_watch_requires_admin_token(client):
+    resp = await client.get("/devices/watch", headers={"Authorization": "Bearer wrong"})
+    assert resp.status == 401
+
+
+async def test_devices_watch_returns_changed_true_on_ws_connect(paired_client):
+    client, token, _device_hash = paired_client
+
+    import asyncio
+
+    watch_task = asyncio.ensure_future(
+        client.get("/devices/watch", params={"timeout": "5"}, headers={"Authorization": f"Bearer {ADMIN_TOKEN}"})
+    )
+    await asyncio.sleep(0.05)  # laisse le long-poll démarrer avant de connecter
+    ws = await connect_and_auth(client, token)
+
+    resp = await watch_task
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["changed"] is True
+    await ws.close()
+
+
+async def test_devices_watch_timeout_returns_changed_false(client):
+    resp = await client.get(
+        "/devices/watch", params={"timeout": "0.2"}, headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["changed"] is False
+
+
+# ─────────────────────────── FCM (POST /fcm-token, GET /phone/pending) ─────
+
+
+async def test_fcm_token_requires_auth(client):
+    resp = await client.post("/fcm-token", json={"fcm_token": "x"})
+    assert resp.status == 401
+
+
+async def test_fcm_token_accepts_valid_token(paired_client):
+    client, token, device_hash = paired_client
+    resp = await client.post(
+        "/fcm-token",
+        json={"fcm_token": "fake-fcm-token"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {"ok": True}
+
+    session = client.app[server.KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    assert session.fcm_token == "fake-fcm-token"
+
+
+async def test_fcm_token_accepts_null_for_deregistration(paired_client):
+    client, token, device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-fcm-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    resp = await client.post(
+        "/fcm-token", json={"fcm_token": None}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status == 200
+    session = client.app[server.KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    assert session.fcm_token is None
+
+
+async def test_fcm_token_rejects_non_string_token(paired_client):
+    client, token, _device_hash = paired_client
+    resp = await client.post(
+        "/fcm-token", json={"fcm_token": 12345}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status == 400
+
+
+async def test_phone_pending_requires_auth(client):
+    resp = await client.get("/phone/pending")
+    assert resp.status == 401
+
+
+async def test_phone_pending_returns_and_drains_buffered_messages(paired_client):
+    """Message envoyé sans WS actif → bufferisé → /phone/pending le retourne
+    ET le vide (contrat drain, pas peek — voir handle_phone_pending)."""
+    client, token, _device_hash = paired_client
+
+    resp = await client.post(
+        "/phone/message", json={"text": "en attente"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    body = await resp.json()
+    assert body["delivered"] is False  # pas de WS actif
+
+    resp = await client.get("/phone/pending", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status == 200
+    body = await resp.json()
+    assert len(body["messages"]) == 1
+    assert body["messages"][0]["payload"]["text"] == "en attente"
+
+    # Deuxième appel immédiat — buffer déjà drainé, liste vide.
+    resp = await client.get("/phone/pending", headers={"Authorization": f"Bearer {token}"})
+    body = await resp.json()
+    assert body["messages"] == []
+
+
+async def test_phone_pending_does_not_interfere_with_ws_drain(paired_client):
+    """Un drainage HTTP suivi d'une connexion WS ne doit pas redélivrer les
+    messages déjà récupérés via /phone/pending."""
+    client, token, _device_hash = paired_client
+
+    await client.post(
+        "/phone/message", json={"text": "msg"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    await client.get("/phone/pending", headers={"Authorization": f"Bearer {token}"})
+
+    ws = await connect_and_auth(client, token)
+    # Rien à drainer au connect — envoyer un ping pour confirmer que la
+    # connexion fonctionne normalement sans redélivrance surprise.
+    await ws.send_json({"version": 1, "channel": "system", "type": "ping", "payload": {}})
+    msg = await ws.receive_json()
+    assert msg["type"] == "pong"
+    await ws.close()
+
+
+async def test_send_fcm_wake_noop_when_fcm_not_configured(paired_client):
+    """Sans firebase-admin configuré (KEY_FCM_APP=None, cas par défaut des
+    tests), /phone/message continue de fonctionner exactement comme avant —
+    dégradation gracieuse, pas d'erreur."""
+    client, token, device_hash = paired_client
+    assert client.app[server.KEY_FCM_APP] is None
+
+    resp = await client.post(
+        "/phone/message", json={"text": "sans fcm"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["delivered"] is False  # toujours bufferisé normalement
+
+    pending = client.app[server.KEY_PUSH_BUFFER].pending_count(device_hash)
+    assert pending == 1
+
+
+async def test_send_fcm_wake_noop_without_fcm_token(paired_client):
+    """_send_fcm_wake appelée directement (pas via /phone/message) : même
+    avec KEY_FCM_APP non-None, sans fcm_token pour ce device elle doit
+    retourner silencieusement sans lever ni tenter d'appel messaging.send
+    (device n'a jamais transmis de token — app non mise à jour, ou FCM
+    indisponible côté device). N'accède qu'au dict app[...] via .get()/
+    indexation en lecture, pas de mutation d'une TestClient app démarrée."""
+    client, _token, device_hash = paired_client
+    fake_app: dict = dict(client.app)
+    fake_app[server.KEY_FCM_APP] = object()  # non-None, jamais utilisé (pas de fcm_token à ce stade)
+    await server._send_fcm_wake(fake_app, device_hash)  # ne doit pas lever
+
+
+async def test_send_fcm_wake_passes_app_as_keyword(paired_client, monkeypatch):
+    """Régression : run_in_executor(None, messaging.send, message, fcm_app)
+    passe fcm_app comme 3e positionnel de messaging.send(message, dry_run,
+    app) — donc sur dry_run, pas sur app. firebase-admin accepte un dry_run
+    non-bool sans lever (bool(fcm_app) est truthy) et retourne fake_message_id
+    sans jamais contacter Google : aucune exception, mais le device ne reçoit
+    jamais le réveil. Découvert en test réel sur device (voir CHANGELOG) —
+    ce test verrouille le fix (functools.partial avec app= en keyword)."""
+    client, token, device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+
+    calls = []
+
+    class FakeMessaging:
+        @staticmethod
+        def Message(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def AndroidConfig(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def send(message, dry_run=False, app=None):
+            calls.append({"message": message, "dry_run": dry_run, "app": app})
+            return "projects/fake/messages/1"
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "firebase_admin.messaging", FakeMessaging)
+    fake_fcm_app = object()
+    fake_app: dict = dict(client.app)
+    fake_app[server.KEY_FCM_APP] = fake_fcm_app
+
+    await server._send_fcm_wake(fake_app, device_hash)
+
+    assert len(calls) == 1
+    assert calls[0]["app"] is fake_fcm_app
+    assert calls[0]["dry_run"] is False
+
+
+async def test_send_fcm_wake_called_when_configured_and_no_ws(paired_client, monkeypatch):
+    """Avec un KEY_FCM_APP mocké, _send_fcm_wake doit être appelée quand (a)
+    pas de WS actif ET (b) un fcm_token existe pour ce device."""
+    client, token, _device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+
+    calls = []
+
+    async def fake_send_fcm_wake(app, device_hash):
+        calls.append(device_hash)
+
+    monkeypatch.setattr(server, "_send_fcm_wake", fake_send_fcm_wake)
+
+    await client.post(
+        "/phone/message", json={"text": "avec fcm"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert len(calls) == 1
+
+
+async def test_send_fcm_wake_not_called_when_ws_active(paired_client, monkeypatch):
+    """Pas de réveil FCM nécessaire si le device a déjà un WS actif — le
+    message est livré en direct."""
+    client, token, _device_hash = paired_client
+    await client.post(
+        "/fcm-token", json={"fcm_token": "fake-token"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    calls = []
+
+    async def fake_send_fcm_wake(app, device_hash):
+        calls.append(device_hash)
+
+    monkeypatch.setattr(server, "_send_fcm_wake", fake_send_fcm_wake)
+
+    ws = await connect_and_auth(client, token)
+    resp = await client.post(
+        "/phone/message", json={"text": "live"}, headers={"Authorization": f"Bearer {token}"}
+    )
+    body = await resp.json()
+    assert body["delivered"] is True
+    assert calls == []
     await ws.close()

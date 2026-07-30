@@ -10,11 +10,13 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Notifications push Android 13+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Maintient le CPU actif quand l'écran est éteint (écoute wake word) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Demande d'exemption de l'optimisation batterie — sans elle, MIUI/EMUI/ColorOS/
+         OneUI tuent le service wake word en arrière-plan en quelques minutes -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Vibration haptique (pipeline vocal) -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Capabilities orchestrateur MCP -->
@@ -22,6 +24,23 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
+    <!-- Package visibility (Android 11+, API 30+) : sans ceci, PackageManager.
+         queryIntentActivities()/getLaunchIntentForPackage() ne voient que
+         quelques apps système + l'app elle-même (cassait discover_apps/
+         launch_app, capabilities orchestrateur MCP). QUERY_ALL_PACKAGES
+         (permission restreinte, nécessite justification Play Store) n'est
+         pas nécessaire : ce bloc <queries> déclare explicitement l'intention
+         "voir toute activité lançable depuis un launcher", suffisant ici
+         sans permission élargie. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"
@@ -36,6 +55,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -60,10 +80,32 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- Réveil FCM data-only des notifications proactives, app fermée —
+             voir HasanFirebaseMessagingService et docs/ARCHITECTURE.md. Pas
+             de foreground service (contrainte batterie explicite du
+             projet) : Google réveille brièvement ce service, qui va chercher
+             le vrai contenu via HTTP sur le relay auto-hébergé. -->
         <service
-            android:name=".HassanNotificationService"
+            android:name=".network.HasanFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Ouverture locale des fichiers téléchargés depuis hermes-webui
+             (share_file) — le lien Markdown pointe vers un serveur TLS
+             auto-signé TOFU qu'un navigateur externe ne connaît pas, donc
+             l'app télécharge elle-même puis ouvre via ce provider. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.hasan.v1.fileprovider"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

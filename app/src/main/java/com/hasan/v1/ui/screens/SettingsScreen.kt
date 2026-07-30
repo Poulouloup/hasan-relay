@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.res.painterResource
@@ -46,6 +47,7 @@ import com.hasan.v1.R
 import com.hasan.v1.ui.components.CutCornerPanel
 import com.hasan.v1.ui.components.HasanToggle
 import com.hasan.v1.ui.theme.HasanColors
+import com.hasan.v1.ui.theme.HasanDimens
 import com.hasan.v1.ui.theme.HasanShapes
 import com.hasan.v1.ui.theme.IBMPlexMono
 import com.hasan.v1.ui.theme.IBMPlexSans
@@ -53,7 +55,7 @@ import com.hasan.v1.ui.theme.IBMPlexSans
 /** Modèle affichable d'un moteur TTS natif — reflète TextToSpeech.EngineInfo sans dépendre du SDK Android ici. */
 data class TtsEngineOption(val name: String, val label: String)
 
-/** Résultat de test de connexion affiché sous le bouton "Tester la connexion". */
+/** Résultat de health check affiché sous une connexion (webUiConnectionStatus). */
 data class ConnectionStatusUi(val ok: Boolean, val message: String)
 
 /**
@@ -62,11 +64,13 @@ data class ConnectionStatusUi(val ok: Boolean, val message: String)
  * et des effets de bord (TOFU, sessions, export, quit).
  */
 data class SettingsUiState(
-    val serverUrl: String,
-    val authToken: String,
-    val connectionStatus: ConnectionStatusUi?,
     val relayPaired: Boolean,
+    val relayEnabled: Boolean,
     val relayConnectionStatus: com.hasan.v1.network.RelayConnectionStatus,
+    val relayManualUrl: String,
+    val relayManualCode: String,
+    val relayErrorMessage: String?,
+    val relayDeviceLabel: String,
     val ttsProvider: String,
     val ttsProviderSubOptions: List<Pair<String, String>>,
     val ttsSelectedSubOption: String,
@@ -80,6 +84,13 @@ data class SettingsUiState(
     val wakeWordSensitivity: Float,
     val wakeWordModels: List<String>,
     val wakeWordSelectedModel: String,
+    val batteryOptimizationIgnored: Boolean,
+    val hermesProfiles: List<com.hasan.v1.webui.models.HermesProfile>,
+    val mcpServers: List<com.hasan.v1.webui.models.McpServer>,
+    val webUiServerUrl: String,
+    val webUiPassword: String,
+    val webUiLoggedIn: Boolean,
+    val webUiConnectionStatus: ConnectionStatusUi?,
     val aboutVersion: String,
     val aboutSubtitle: String,
     val aboutWakeWord: String,
@@ -89,12 +100,16 @@ data class SettingsUiState(
 
 /** Callbacks délégués au Fragment — aucune logique métier dans les composables. */
 class SettingsCallbacks(
-    val onServerUrlChange: (String) -> Unit,
-    val onAuthTokenChange: (String) -> Unit,
-    val onTestConnection: () -> Unit,
     val onManageCerts: () -> Unit,
     val onScanQrPairing: () -> Unit,
-    val onOpenToolsPermissions: () -> Unit,
+    val onRelayManualUrlChange: (String) -> Unit,
+    val onRelayManualCodeChange: (String) -> Unit,
+    val onRelayDeviceLabelChange: (String) -> Unit,
+    val onDismissRelayError: () -> Unit,
+    val onRelayToggle: (Boolean) -> Unit,
+    val onDisconnectWebUi: () -> Unit,
+    /** Intercepte l'édition d'un champ secret (mot de passe webui, code pairing) — authentification biométrique avant [onSuccess]. */
+    val onAuthRequiredForSecretEdit: (onSuccess: () -> Unit) -> Unit,
     val onTtsProviderChange: (String) -> Unit,
     val onTtsSubOptionChange: (String) -> Unit,
     val onNativeEngineChange: (String) -> Unit,
@@ -104,7 +119,13 @@ class SettingsCallbacks(
     val onWakeWordEnabledChange: (Boolean) -> Unit,
     val onWakeWordSensitivityChange: (Float) -> Unit,
     val onWakeWordModelChange: (String) -> Unit,
-    val onQuit: () -> Unit,
+    val onRequestBatteryExemption: () -> Unit,
+    val onProfileSelect: (String) -> Unit,
+    val onMcpToggle: (String, Boolean) -> Unit,
+    val onWebUiServerUrlChange: (String) -> Unit,
+    val onWebUiPasswordChange: (String) -> Unit,
+    val onWebUiConnect: () -> Unit,
+    val onOpenLogs: () -> Unit,
     val onMenuClick: () -> Unit
 )
 
@@ -117,9 +138,9 @@ private fun SectionTitle(text: String) {
         color = sectionTitleColor,
         fontFamily = IBMPlexMono,
         fontWeight = FontWeight.Medium,
-        fontSize = 9.sp,
+        fontSize = HasanDimens.TextLabelSmall,
         letterSpacing = 1.5.sp,
-        modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+        modifier = Modifier.padding(start = HasanDimens.SpacingXs, bottom = HasanDimens.SpacingS)
     )
 }
 
@@ -143,7 +164,7 @@ private fun SettingsControlPanel(title: String, content: @Composable ColumnScope
     Column {
         SectionTitle(title)
         CutCornerPanel(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp), content = content)
+            Column(modifier = Modifier.padding(HasanDimens.SpacingL), content = content)
         }
     }
 }
@@ -163,14 +184,14 @@ private fun SettingsRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 13.dp, vertical = 11.dp),
+                .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = label,
                 color = HasanColors.TextPrimary,
                 fontFamily = IBMPlexSans,
-                fontSize = 12.sp,
+                fontSize = HasanDimens.TextBodyMedium,
                 modifier = Modifier.weight(1f)
             )
             trailing()
@@ -179,7 +200,7 @@ private fun SettingsRow(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(1.dp)
+                    .height(HasanDimens.BorderWidth)
                     .background(HasanColors.Border)
             )
         }
@@ -198,7 +219,7 @@ private fun SettingsRowValue(text: String) {
         text = text,
         color = HasanColors.TextSecondary,
         fontFamily = IBMPlexMono,
-        fontSize = 10.5.sp,
+        fontSize = HasanDimens.TextLabelMedium,
         textAlign = androidx.compose.ui.text.style.TextAlign.End,
         modifier = Modifier.widthIn(max = 180.dp)
     )
@@ -209,7 +230,7 @@ private fun SettingsRowValue(text: String) {
 private fun EditPencilButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .size(22.dp)
+            .size(HasanDimens.TouchTarget)
             .clip(CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
@@ -226,6 +247,10 @@ private fun EditPencilButton(onClick: () -> Unit, modifier: Modifier = Modifier)
 /**
  * Ligne éditable : affiche la valeur + crayon en mode lecture, bascule vers un OutlinedTextField
  * compact inline au clic sur le crayon. État d'édition purement local (pas de champ UiState).
+ *
+ * [onAuthRequiredForEdit] optionnel : si fourni, le clic sur le crayon lui délègue le passage en
+ * édition (authentification biométrique côté Fragment) au lieu de l'appliquer directement — utilisé
+ * pour les champs secrets (mot de passe webui, code de pairing).
  */
 @Composable
 private fun SettingsEditableRow(
@@ -235,7 +260,8 @@ private fun SettingsEditableRow(
     modifier: Modifier = Modifier,
     showDivider: Boolean = true,
     placeholder: String = "",
-    isSecret: Boolean = false
+    isSecret: Boolean = false,
+    onAuthRequiredForEdit: ((onSuccess: () -> Unit) -> Unit)? = null
 ) {
     var editing by remember { mutableStateOf(false) }
     var draft by remember(value) { mutableStateOf(value) }
@@ -246,21 +272,21 @@ private fun SettingsEditableRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 13.dp, vertical = 8.dp),
+                    .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = label,
                     color = HasanColors.TextPrimary,
                     fontFamily = IBMPlexSans,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(bottom = 4.dp)
+                    fontSize = HasanDimens.TextBodyMedium,
+                    modifier = Modifier.padding(bottom = HasanDimens.SpacingXs)
                 )
             }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 13.dp, vertical = 8.dp),
+                    .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedTextField(
@@ -268,8 +294,8 @@ private fun SettingsEditableRow(
                     onValueChange = { draft = it; onValueChange(it) },
                     modifier = Modifier.weight(1f),
                     singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = IBMPlexMono, fontSize = 12.sp),
-                    placeholder = { Text(placeholder, color = HasanColors.TextMutedA11y, fontSize = 12.sp) },
+                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = IBMPlexMono, fontSize = HasanDimens.TextBodyMedium),
+                    placeholder = { Text(placeholder, color = HasanColors.TextMutedA11y, fontSize = HasanDimens.TextBodyMedium) },
                     visualTransformation = if (isSecret && !secretVisible) PasswordVisualTransformation() else VisualTransformation.None,
                     trailingIcon = if (isSecret) {
                         {
@@ -277,7 +303,7 @@ private fun SettingsEditableRow(
                                 Text(
                                     text = if (secretVisible) "Masquer" else "Afficher",
                                     color = HasanColors.TextSecondary,
-                                    fontSize = 9.sp,
+                                    fontSize = HasanDimens.TextLabelSmall,
                                     fontFamily = IBMPlexMono
                                 )
                             }
@@ -285,29 +311,29 @@ private fun SettingsEditableRow(
                     } else null,
                     colors = hasanTextFieldColors()
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
                 Box(
                     modifier = Modifier
                         .clip(HasanShapes.panelSmall())
                         .background(HasanColors.Accent)
                         .clickable { editing = false }
-                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS)
                 ) {
-                    Text(text = "OK", color = HasanColors.TextPrimary, fontFamily = IBMPlexMono, fontSize = 11.sp)
+                    Text(text = "OK", color = HasanColors.TextPrimary, fontFamily = IBMPlexMono, fontSize = HasanDimens.TextCaption)
                 }
             }
         } else {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 13.dp, vertical = 11.dp),
+                    .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = label,
                     color = HasanColors.TextPrimary,
                     fontFamily = IBMPlexSans,
-                    fontSize = 12.sp,
+                    fontSize = HasanDimens.TextBodyMedium,
                     modifier = Modifier.weight(1f)
                 )
                 val displayValue = if (isSecret && value.isNotEmpty()) "•".repeat(value.length.coerceAtMost(10)) else value
@@ -315,18 +341,20 @@ private fun SettingsEditableRow(
                     text = displayValue.ifEmpty { placeholder },
                     color = if (displayValue.isEmpty()) HasanColors.TextMutedA11y else HasanColors.TextSecondary,
                     fontFamily = IBMPlexMono,
-                    fontSize = 10.5.sp,
+                    fontSize = HasanDimens.TextLabelMedium,
                     maxLines = 1
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                EditPencilButton(onClick = { editing = true })
+                Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+                EditPencilButton(onClick = {
+                    if (onAuthRequiredForEdit != null) onAuthRequiredForEdit { editing = true } else editing = true
+                })
             }
         }
         if (showDivider) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(1.dp)
+                    .height(HasanDimens.BorderWidth)
                     .background(HasanColors.Border)
             )
         }
@@ -341,18 +369,29 @@ private fun CutCornerFilledButton(
     modifier: Modifier = Modifier,
     backgroundColor: Color = HasanColors.Accent,
     contentColor: Color = HasanColors.TextPrimary,
-    shape: Shape = HasanShapes.panelSmall()
+    shape: Shape = HasanShapes.panelSmall(),
+    icon: Int? = null
 ) {
-    Box(
+    Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
             .background(backgroundColor)
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
-        contentAlignment = Alignment.Center
+            .padding(vertical = HasanDimens.SpacingM),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = text, color = contentColor, fontFamily = IBMPlexSans, fontSize = 14.sp)
+        if (icon != null) {
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(icon),
+                contentDescription = null,
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(contentColor),
+                modifier = Modifier.size(HasanDimens.IconSmall)
+            )
+            Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+        }
+        Text(text = text, color = contentColor, fontFamily = IBMPlexSans, fontSize = HasanDimens.TextBody)
     }
 }
 
@@ -372,12 +411,12 @@ fun CutCornerOutlineButton(
             .fillMaxWidth()
             .clip(shape)
             .background(backgroundColor)
-            .border(1.dp, borderColor, shape)
+            .border(HasanDimens.BorderWidth, borderColor, shape)
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
+            .padding(vertical = HasanDimens.SpacingM),
         contentAlignment = Alignment.Center
     ) {
-        Text(text = text, color = contentColor, fontFamily = IBMPlexSans, fontSize = 13.sp)
+        Text(text = text, color = contentColor, fontFamily = IBMPlexSans, fontSize = HasanDimens.TextSubtitle)
     }
 }
 
@@ -391,133 +430,285 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(HasanColors.BgBase)
     ) {
-        com.hasan.v1.ui.components.HasanMinimalHeader(callbacks.onMenuClick)
+        com.hasan.v1.ui.components.HasanMinimalHeader(callbacks.onMenuClick, title = "Paramètres")
         Column(
             modifier = Modifier
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+                .padding(horizontal = HasanDimens.SpacingL, vertical = HasanDimens.SpacingS),
+            verticalArrangement = Arrangement.spacedBy(HasanDimens.SpacingXl)
         ) {
-            // Ordre selon disposition.md : Connexion Hermes → Voix → Wake Word →
-            // Permissions de Hermes → À propos. Gestion des sessions déplacée
-            // entièrement dans le drawer (voir HasanDrawer.kt) — plus de section
-            // dédiée ici.
+            // Ordre : Connexion Hermes → Voix → Wake Word → Profil → Serveurs MCP →
+            // Logs → À propos. Gestion des sessions déplacée entièrement dans le
+            // drawer (voir HasanDrawer.kt), "Tools & Permissions" promu en onglet
+            // à part entière (HasanNavTab.TOOLS) — plus de section dédiée ici.
             ConnectionSection(state, callbacks)
             VoiceSection(state, callbacks)
             WakeWordSection(state, callbacks)
-            PermissionsSection(callbacks)
+            ProfileSection(state, callbacks)
+            McpServersSection(state, callbacks)
+            LogsSection(callbacks)
             AboutSection(state)
 
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        // Action de fin de liste, hors de tout groupe/panel — espacement généreux pour
-        // bien la signaler comme distincte des réglages au-dessus.
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 20.dp)) {
-            CutCornerOutlineButton(
-                text = "Quitter Hasan",
-                onClick = callbacks.onQuit,
-                borderColor = HasanColors.Accent,
-                contentColor = HasanColors.Accent
-            )
+            Spacer(modifier = Modifier.height(HasanDimens.SpacingS))
         }
     }
 }
 
 // ─────────────────────────── Connexion Hermes ──────────────────────────────────
 //
-// Une seule section : config Hermes (URL/token/état) + appairage relay WebSocket,
-// fusionnées dans un même macro-panel (fond englobant CutCornerPanel) plutôt que
-// deux sous-sections juste rapprochées par de l'espacement — cf. disposition.md
-// ("tout ce qui est nécessaire pour la partie connexion, cela inclue appairage
-// relay, etc.") et le rapport d'audit UI (absence de délimitation visuelle claire
-// entre panels d'un même groupe logique).
+// Rework : un seul point d'entrée (scan QR) configure les deux connexions d'un
+// coup quand le QR les porte (pairFromQr le fait déjà côté ViewModel), un bloc
+// de statut unifié montre les deux d'un coup d'œil, et la saisie manuelle
+// (repli en second recours, relay-only pour le pairing manuel — le webui
+// manuel reste dans l'accordéon aussi) est repliée par défaut. Le relay est
+// traité comme sensible : switch dédié, activation protégée par
+// authentification biométrique/PIN côté SettingsFragment (le Composable ne
+// fait qu'exposer l'intention via onRelayToggle, jamais l'authentification
+// elle-même). L'ancienne section "config héritée" (settings.serverUrl/
+// authToken, vestige du flux HTTP relay pré-migration webui) reste retirée.
 
 @Composable
 private fun ConnectionSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
-    Column {
-        SectionTitle("CONNEXION HERMES")
-        CutCornerPanel(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Column(modifier = Modifier.clip(HasanShapes.panelSmall()).background(HasanColors.BgSurface2)) {
-                    SettingsEditableRow(
-                        label = "URL du serveur",
-                        value = state.serverUrl,
-                        onValueChange = callbacks.onServerUrlChange,
-                        placeholder = "http://serveur:8642/v1"
-                    )
-                    SettingsEditableRow(
-                        label = "Token d'authentification",
-                        value = state.authToken,
-                        onValueChange = callbacks.onAuthTokenChange,
-                        placeholder = "HASAN_DEV_TOKEN",
-                        isSecret = true,
-                        showDivider = state.connectionStatus != null
-                    )
-                    state.connectionStatus?.let { status ->
-                        SettingsRow(label = "État", showDivider = false) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(if (status.ok) HasanColors.Accent else HasanColors.TextSecondary)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = status.message,
-                                    color = if (status.ok) HasanColors.Accent else HasanColors.TextSecondary,
-                                    fontFamily = IBMPlexMono,
-                                    fontSize = 10.5.sp
-                                )
-                            }
-                        }
+    Column(verticalArrangement = Arrangement.spacedBy(HasanDimens.SpacingL)) {
+        SectionTitle("CONNEXIONS")
+
+        state.relayErrorMessage?.let { message ->
+            RelayErrorBanner(message = message, onDismiss = callbacks.onDismissRelayError)
+        }
+
+        ConnectionStatusPanel(state, callbacks)
+
+        CutCornerFilledButton(
+            text = "Scanner un QR de pairing",
+            onClick = callbacks.onScanQrPairing,
+            icon = com.hasan.v1.R.drawable.ic_qr_code
+        )
+        Text(
+            text = "Configure automatiquement le chat et le relay si le QR les inclut.",
+            color = HasanColors.TextMutedA11y,
+            fontSize = HasanDimens.TextCaption,
+            modifier = Modifier.padding(top = HasanDimens.SpacingXs, start = HasanDimens.SpacingXs)
+        )
+
+        ManualConnectionAccordion(state, callbacks)
+
+        CutCornerOutlineButton(
+            text = "Gérer les certificats de confiance",
+            onClick = callbacks.onManageCerts
+        )
+    }
+}
+
+/** Statut des deux connexions d'un coup d'œil — chat (texte + déconnexion) et relay (switch protégé). */
+@Composable
+private fun ConnectionStatusPanel(state: SettingsUiState, callbacks: SettingsCallbacks) {
+    CutCornerPanel(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(HasanDimens.SpacingL)) {
+            Column(modifier = Modifier.clip(HasanShapes.panelSmall()).background(HasanColors.BgSurface2)) {
+                SettingsRow(label = "Chat (hermes-webui)") {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (state.webUiLoggedIn) HasanColors.Accent else HasanColors.TextSecondary)
+                        )
+                        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+                        Text(
+                            text = state.webUiConnectionStatus?.message
+                                ?: if (state.webUiLoggedIn) "Connecté" else "Non connecté",
+                            color = if (state.webUiLoggedIn) HasanColors.Accent else HasanColors.TextSecondary,
+                            fontFamily = IBMPlexMono,
+                            fontSize = HasanDimens.TextLabelMedium
+                        )
                     }
                 }
+                SettingsRow(label = "Relay (téléphone)", showDivider = false) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (state.relayPaired && state.relayEnabled) HasanColors.Accent else HasanColors.TextSecondary)
+                        )
+                        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+                        Text(
+                            text = relayStatusLabel(state.relayPaired, state.relayEnabled, state.relayConnectionStatus),
+                            color = if (state.relayPaired && state.relayEnabled) HasanColors.Accent else HasanColors.TextSecondary,
+                            fontFamily = IBMPlexMono,
+                            fontSize = HasanDimens.TextLabelMedium
+                        )
+                        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+                        HasanToggle(checked = state.relayEnabled, onCheckedChange = callbacks.onRelayToggle)
+                    }
+                }
+            }
 
-                Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(HasanDimens.SpacingM))
 
+            Row(horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)) {
                 CutCornerFilledButton(
-                    text = "⚡ Tester la connexion",
-                    onClick = callbacks.onTestConnection
+                    text = if (state.webUiLoggedIn) "Se reconnecter" else "Se connecter",
+                    onClick = callbacks.onWebUiConnect,
+                    modifier = Modifier.weight(1f)
                 )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                CutCornerOutlineButton(
-                    text = "Gérer les certificats de confiance",
-                    onClick = callbacks.onManageCerts
-                )
-
-                Divider()
-
-                Column(modifier = Modifier.clip(HasanShapes.panelSmall()).background(HasanColors.BgSurface2)) {
-                    SettingsRow(label = "Appareil appairé (relay)", showDivider = false) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(if (state.relayPaired) HasanColors.Accent else HasanColors.TextSecondary)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = relayStatusLabel(state.relayPaired, state.relayConnectionStatus),
-                                color = if (state.relayPaired) HasanColors.Accent else HasanColors.TextSecondary,
-                                fontFamily = IBMPlexMono,
-                                fontSize = 10.5.sp
-                            )
-                        }
-                    }
+                if (state.webUiLoggedIn) {
+                    CutCornerOutlineButton(
+                        text = "Déconnecter",
+                        onClick = callbacks.onDisconnectWebUi,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
+            }
+        }
+    }
+}
 
-                Spacer(modifier = Modifier.height(10.dp))
+@Composable
+private fun RelayErrorBanner(message: String, onDismiss: () -> Unit) {
+    CutCornerPanel(
+        modifier = Modifier.fillMaxWidth().padding(vertical = HasanDimens.SpacingXs),
+        backgroundColor = HasanColors.BgSurface,
+        borderColor = HasanColors.Accent
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(HasanDimens.SpacingM),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = message,
+                color = HasanColors.Accent,
+                fontSize = HasanDimens.TextBodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            Image(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = "Fermer",
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextMutedA11y),
+                modifier = Modifier
+                    .size(HasanDimens.IconSmall)
+                    .padding(start = HasanDimens.SpacingS)
+                    .clickable(onClick = onDismiss)
+            )
+        }
+    }
+}
 
-                CutCornerOutlineButton(
-                    text = if (state.relayPaired) "Réappairer un appareil (scanner QR)" else "Appairer un appareil (scanner QR)",
-                    onClick = callbacks.onScanQrPairing
-                )
+/**
+ * Menu dépliant "Configuration manuelle" — replié par défaut, second recours
+ * derrière le scan QR. Regroupe les 4 champs existants (URL/mot de passe
+ * hermes-webui, URL/code relay) tels quels, avec leurs boutons d'action
+ * respectifs — même chevron-rotation que SkillsScreen.CategoryHeader.
+ */
+@Composable
+private fun ManualConnectionAccordion(state: SettingsUiState, callbacks: SettingsCallbacks) {
+    var expanded by remember { mutableStateOf(false) }
+    val rotation by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        label = "manual-connection-chevron-rotation"
+    )
+
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = HasanDimens.SpacingS),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "▶",
+                color = HasanColors.TextMutedA11y,
+                fontSize = HasanDimens.TextLabelSmall,
+                modifier = Modifier.rotate(rotation).padding(end = 6.dp)
+            )
+            Text(
+                text = "CONFIGURATION MANUELLE",
+                color = HasanColors.TextMutedA11y,
+                fontFamily = IBMPlexMono,
+                fontSize = HasanDimens.TextLabelSmall,
+                letterSpacing = 1.sp,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        if (expanded) {
+            CutCornerPanel(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(HasanDimens.SpacingL)) {
+                    Text(
+                        text = "Chat (hermes-webui)",
+                        color = HasanColors.TextSecondary,
+                        fontFamily = IBMPlexMono,
+                        fontSize = HasanDimens.TextLabelSmall,
+                        letterSpacing = 1.sp,
+                        modifier = Modifier.padding(bottom = HasanDimens.SpacingS)
+                    )
+                    Column(modifier = Modifier.clip(HasanShapes.panelSmall()).background(HasanColors.BgSurface2)) {
+                        SettingsEditableRow(
+                            label = "URL hermes-webui",
+                            value = state.webUiServerUrl,
+                            onValueChange = callbacks.onWebUiServerUrlChange,
+                            placeholder = "https://serveur"
+                        )
+                        SettingsEditableRow(
+                            label = "Mot de passe",
+                            value = state.webUiPassword,
+                            onValueChange = callbacks.onWebUiPasswordChange,
+                            placeholder = "mot de passe",
+                            isSecret = true,
+                            showDivider = false,
+                            onAuthRequiredForEdit = callbacks.onAuthRequiredForSecretEdit
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(HasanDimens.SpacingL))
+
+                    Text(
+                        text = "Relay (actions téléphone)",
+                        color = HasanColors.TextSecondary,
+                        fontFamily = IBMPlexMono,
+                        fontSize = HasanDimens.TextLabelSmall,
+                        letterSpacing = 1.sp,
+                        modifier = Modifier.padding(bottom = HasanDimens.SpacingS)
+                    )
+                    Column(modifier = Modifier.clip(HasanShapes.panelSmall()).background(HasanColors.BgSurface2)) {
+                        SettingsEditableRow(
+                            label = "URL du relay",
+                            value = state.relayManualUrl,
+                            onValueChange = callbacks.onRelayManualUrlChange,
+                            placeholder = "https://relay:8767"
+                        )
+                        SettingsEditableRow(
+                            label = "Code de pairing",
+                            value = state.relayManualCode,
+                            onValueChange = callbacks.onRelayManualCodeChange,
+                            placeholder = "ABC123",
+                            isSecret = true,
+                            onAuthRequiredForEdit = callbacks.onAuthRequiredForSecretEdit
+                        )
+                        SettingsEditableRow(
+                            label = "Nom de cet appareil",
+                            value = state.relayDeviceLabel,
+                            onValueChange = callbacks.onRelayDeviceLabelChange,
+                            placeholder = "Téléphone de Loup",
+                            showDivider = false
+                        )
+                    }
+                    Text(
+                        text = "Le nom de l'appareil permet à Hermes de le distinguer quand plusieurs appareils (téléphone, Hasan Desktop…) sont connectés en même temps.",
+                        color = HasanColors.TextMutedA11y,
+                        fontSize = HasanDimens.TextCaption,
+                        modifier = Modifier.padding(top = HasanDimens.SpacingXs, start = HasanDimens.SpacingXs)
+                    )
+                    Text(
+                        text = "Le bouton \"Se connecter\" ci-dessus appaire le relay et connecte le chat en un seul geste.",
+                        color = HasanColors.TextMutedA11y,
+                        fontSize = HasanDimens.TextCaption,
+                        modifier = Modifier.padding(top = HasanDimens.SpacingS, start = HasanDimens.SpacingXs)
+                    )
+                }
             }
         }
     }
@@ -525,9 +716,11 @@ private fun ConnectionSection(state: SettingsUiState, callbacks: SettingsCallbac
 
 private fun relayStatusLabel(
     paired: Boolean,
+    enabled: Boolean,
     status: com.hasan.v1.network.RelayConnectionStatus
 ): String {
     if (!paired) return "Non appairé"
+    if (!enabled) return "Appairé — désactivé"
     return when (status) {
         com.hasan.v1.network.RelayConnectionStatus.CONNECTED -> "Appairé — connecté"
         com.hasan.v1.network.RelayConnectionStatus.CONNECTING -> "Appairé — connexion…"
@@ -536,34 +729,30 @@ private fun relayStatusLabel(
     }
 }
 
-// ─────────────────────────── Permissions de Hermes ─────────────────────────────
-//
-// Contient uniquement le lien vers l'écran Tools & Permissions — cf. disposition.md
-// ("contient juste le bouton tools et permissions pour l'instant").
-
+/**
+ * Serveurs MCP configurés (~/.hermes/config.yaml) — toggle actif/inactif par
+ * serveur, sans écran dédié. Un serveur avec toggle_supported=false (contrôlé
+ * autrement côté serveur) affiche son état en lecture seule plutôt qu'un
+ * toggle inerte trompeur.
+ */
 @Composable
-private fun PermissionsSection(callbacks: SettingsCallbacks) {
-    SettingsSection(title = "PERMISSIONS DE HERMES") {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = callbacks.onOpenToolsPermissions)
-                .padding(horizontal = 13.dp, vertical = 13.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Tools & Permissions",
-                color = HasanColors.TextPrimary,
-                fontFamily = IBMPlexSans,
-                fontSize = 13.sp,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                text = "→",
-                color = HasanColors.Accent,
-                fontFamily = IBMPlexMono,
-                fontSize = 14.sp
-            )
+private fun McpServersSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
+    if (state.mcpServers.isEmpty()) return
+    SettingsSection(title = "SERVEURS MCP") {
+        state.mcpServers.forEachIndexed { index, server ->
+            SettingsRow(
+                label = server.name,
+                showDivider = index < state.mcpServers.lastIndex
+            ) {
+                if (server.toggleSupported) {
+                    HasanToggle(
+                        checked = server.enabled,
+                        onCheckedChange = { checked -> callbacks.onMcpToggle(server.name, checked) }
+                    )
+                } else {
+                    SettingsRowValue(text = if (server.enabled) "Actif" else "Inactif")
+                }
+            }
         }
     }
 }
@@ -581,7 +770,7 @@ private fun VoiceSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
             Text(
                 text = "Synthèse vocale (TTS)",
                 color = HasanColors.TextPrimary,
-                fontSize = 14.sp,
+                fontSize = HasanDimens.TextBody,
                 modifier = Modifier.weight(1f)
             )
             HasanToggle(checked = state.ttsEnabled, onCheckedChange = callbacks.onTtsEnabledChange)
@@ -598,7 +787,7 @@ private fun VoiceSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
             onValueChange = callbacks.onTtsSpeedChange
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(HasanDimens.SpacingM))
 
         LabeledSlider(
             label = "Volume",
@@ -663,14 +852,14 @@ private fun ProviderChoiceRow(label: String, selected: Boolean, onClick: () -> U
             .fillMaxWidth()
             .clip(shape)
             .background(bgColor)
-            .border(1.dp, borderColor, shape)
+            .border(HasanDimens.BorderWidth, borderColor, shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RadioDot(selected = selected)
         Spacer(modifier = Modifier.width(10.dp))
-        Text(text = label, color = HasanColors.TextPrimary, fontSize = 14.sp)
+        Text(text = label, color = HasanColors.TextPrimary, fontSize = HasanDimens.TextBody)
     }
 }
 
@@ -686,12 +875,12 @@ private fun RadioOptionGroup(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onSelect(value) }
-                    .padding(vertical = 8.dp),
+                    .padding(vertical = HasanDimens.SpacingS),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 RadioDot(selected = value == selected)
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(text = label, color = HasanColors.TextPrimary, fontSize = 14.sp)
+                Text(text = label, color = HasanColors.TextPrimary, fontSize = HasanDimens.TextBody)
             }
         }
     }
@@ -722,8 +911,8 @@ private fun Divider() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 12.dp)
-            .height(1.dp)
+            .padding(vertical = HasanDimens.SpacingM)
+            .height(HasanDimens.BorderWidth)
             .background(HasanColors.Border)
     )
 }
@@ -738,8 +927,8 @@ private fun LabeledSlider(
     onValueChange: (Float) -> Unit
 ) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(text = label, color = HasanColors.TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
-        Text(text = valueText, color = HasanColors.TextSecondary, fontSize = 13.sp)
+        Text(text = label, color = HasanColors.TextPrimary, fontSize = HasanDimens.TextBody, modifier = Modifier.weight(1f))
+        Text(text = valueText, color = HasanColors.TextSecondary, fontSize = HasanDimens.TextSubtitle)
     }
     Slider(
         value = value,
@@ -766,7 +955,7 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
             Text(
                 text = "Activer \"Ok Hasan\"",
                 color = HasanColors.TextPrimary,
-                fontSize = 14.sp,
+                fontSize = HasanDimens.TextBody,
                 modifier = Modifier.weight(1f)
             )
             HasanToggle(checked = state.wakeWordEnabled, onCheckedChange = callbacks.onWakeWordEnabledChange)
@@ -777,7 +966,7 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
         Text(
             text = "Sensibilité du wake word",
             color = HasanColors.TextPrimary,
-            fontSize = 14.sp,
+            fontSize = HasanDimens.TextBody,
             modifier = Modifier.padding(bottom = 6.dp)
         )
         Slider(
@@ -795,10 +984,10 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
             Text(
                 text = "Moins sensible",
                 color = HasanColors.TextSecondary,
-                fontSize = 10.sp,
+                fontSize = HasanDimens.TextLabelMedium,
                 modifier = Modifier.weight(1f)
             )
-            Text(text = "Plus sensible", color = HasanColors.TextSecondary, fontSize = 10.sp)
+            Text(text = "Plus sensible", color = HasanColors.TextSecondary, fontSize = HasanDimens.TextLabelMedium)
         }
 
         Divider()
@@ -806,7 +995,7 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
         Text(
             text = "Modèle de détection",
             color = HasanColors.TextPrimary,
-            fontSize = 14.sp,
+            fontSize = HasanDimens.TextBody,
             modifier = Modifier.padding(bottom = 6.dp)
         )
         RadioOptionGroup(
@@ -814,13 +1003,97 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
             selected = state.wakeWordSelectedModel,
             onSelect = callbacks.onWakeWordModelChange
         )
+
+        Divider()
+
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Écoute en arrière-plan",
+                color = HasanColors.TextPrimary,
+                fontSize = HasanDimens.TextBody,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = if (state.batteryOptimizationIgnored) "Autorisée" else "Non autorisée",
+                color = if (state.batteryOptimizationIgnored) HasanColors.Accent else HasanColors.TextSecondary,
+                fontFamily = IBMPlexMono,
+                fontSize = HasanDimens.TextSubtitle
+            )
+        }
+        if (!state.batteryOptimizationIgnored) {
+            Text(
+                text = "Certains téléphones (Xiaomi, Huawei, Samsung, OnePlus…) coupent le wake word en arrière-plan sans cette autorisation.",
+                color = HasanColors.TextSecondary,
+                fontSize = HasanDimens.TextLabelMedium,
+                modifier = Modifier.padding(top = 4.dp, bottom = HasanDimens.SpacingS)
+            )
+            CutCornerOutlineButton(
+                text = "Autoriser l'écoute en arrière-plan",
+                onClick = callbacks.onRequestBatteryExemption
+            )
+        }
+    }
+}
+
+// ─────────────────────────── Profil Hermes ──────────────────────────────────────
+//
+// Changer de profil bascule tout le HERMES_HOME (config/skills/workspace) —
+// action lourde, à la différence du choix de modèle par tour (barre de
+// composition du Chat). Un seul profil ("default") existe sur le serveur de
+// test, mais le sélecteur est déjà fonctionnel (voir WebUiProfilesClient).
+
+@Composable
+private fun ProfileSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
+    if (state.hermesProfiles.isEmpty()) return
+    SettingsControlPanel(title = "PROFIL HERMES") {
+        state.hermesProfiles.forEachIndexed { index, profile ->
+            ProviderChoiceRow(
+                label = "${profile.name} — ${profile.skillCount} skills" +
+                    (profile.model?.let { " · $it" } ?: ""),
+                selected = profile.isActive,
+                onClick = { callbacks.onProfileSelect(profile.name) }
+            )
+            if (index < state.hermesProfiles.lastIndex) {
+                Spacer(modifier = Modifier.height(HasanDimens.SpacingS))
+            }
+        }
+    }
+}
+
+// ─────────────────────────── Logs ───────────────────────────────────────────────
+//
+// Contient uniquement le lien vers l'écran Logs (overlay plein écran, voir
+// MainActivity.openLogs()) — pas de rendu inline ici pour ne pas allonger
+// l'écran Réglages avec un journal qui peut contenir beaucoup d'événements.
+
+@Composable
+private fun LogsSection(callbacks: SettingsCallbacks) {
+    SettingsSection(title = "LOGS") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = callbacks.onOpenLogs)
+                .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Voir les logs",
+                color = HasanColors.TextPrimary,
+                fontFamily = IBMPlexSans,
+                fontSize = HasanDimens.TextSubtitle,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "→",
+                color = HasanColors.Accent,
+                fontFamily = IBMPlexMono,
+                fontSize = HasanDimens.TextBody
+            )
+        }
     }
 }
 
 // ─────────────────────────── Groupe : À propos ─────────────────────────────────
-//
-// Le bouton "Quitter Hasan" est sorti de ce groupe — c'est désormais une action de
-// fin de liste, rendue par SettingsScreen() en dehors de tout groupe/panel.
 
 @Composable
 private fun AboutSection(state: SettingsUiState) {
@@ -828,7 +1101,7 @@ private fun AboutSection(state: SettingsUiState) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 13.dp, vertical = 11.dp),
+                .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
@@ -844,13 +1117,13 @@ private fun AboutSection(state: SettingsUiState) {
                     modifier = Modifier.size(20.dp)
                 )
             }
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(HasanDimens.SpacingM))
             Column {
-                Text(text = state.aboutVersion, color = HasanColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text(text = state.aboutSubtitle, color = HasanColors.TextSecondary, fontSize = 12.sp)
+                Text(text = state.aboutVersion, color = HasanColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = HasanDimens.TextTitle)
+                Text(text = state.aboutSubtitle, color = HasanColors.TextSecondary, fontSize = HasanDimens.TextBodyMedium)
             }
         }
-        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(HasanColors.Border))
+        Box(modifier = Modifier.fillMaxWidth().height(HasanDimens.BorderWidth).background(HasanColors.Border))
 
         SettingsRow(label = "Wake word") { SettingsRowValue(state.aboutWakeWord) }
         SettingsRow(label = "STT / TTS") { SettingsRowValue(state.aboutSttTts) }

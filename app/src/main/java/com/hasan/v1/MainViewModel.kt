@@ -1,9 +1,13 @@
 ﻿package com.hasan.v1
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hasan.v1.audio.BargeInListener
@@ -13,16 +17,25 @@ import com.hasan.v1.network.ActivityLog
 import com.hasan.v1.network.ConnectionManager
 import com.hasan.v1.network.RelayConnectionStatus
 import com.hasan.v1.network.models.ErrorType
-import com.hasan.v1.network.models.HealthResult
-import com.hasan.v1.network.models.StreamEvent
+import com.hasan.v1.network.models.toolDisplayMessage
 import com.hasan.v1.utils.LatencyLog
+import com.hasan.v1.webui.SseBackoff
+import com.hasan.v1.webui.WebUiChatStream
+import com.hasan.v1.webui.WebUiClarifyStream
+import com.hasan.v1.webui.WebUiClientHolder
+import com.hasan.v1.webui.models.WebUiHealthResult
+import com.hasan.v1.webui.models.WebUiLoginResult
+import com.hasan.v1.webui.models.WebUiSteerResult
+import com.hasan.v1.webui.models.WebUiStreamEvent
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import com.hasan.v1.db.Conversation
 import com.hasan.v1.db.HassanDatabase
 import com.hasan.v1.db.HermesSession
 import com.hasan.v1.db.Message
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -152,12 +165,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             multiplexer.system.collect { envelope ->
-                activityLog.log("Événement système : ${envelope.type}", tag = "CRON")
+                activityLog.log("Événement système : ${envelope.type}", tag = "SYSTEM")
             }
         }
         viewModelScope.launch {
             multiplexer.proactive.collect { envelope ->
                 activityLog.log("Notification proactive : ${envelope.type}", tag = "PUSH")
+                if (envelope.type != "message") return@collect
+                val text = envelope.payload.optString("text").takeIf { it.isNotBlank() } ?: return@collect
+                // App foreground : rien à afficher en plus du log ci-dessus —
+                // pas d'écran dédié au canal proactif pour l'instant. App
+                // fermée (pas de WS) : couvert par HasanFirebaseMessagingService
+                // via le réveil FCM, chemin séparé (même ProactiveNotifier).
+                if (!isAppInForeground()) {
+                    com.hasan.v1.network.ProactiveNotifier.show(getApplication(), text)
+                }
             }
         }
         viewModelScope.launch {
@@ -168,15 +190,122 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Doit être déclaré APRÈS connectionManager (ordre inverse de
-    // bridgeCommandHandler !) : bridgeCommandHandler est référencé DANS le
-    // bloc .apply de connectionManager donc doit le précéder, alors que
-    // chatStreamHandler dépend directement de connectionManager déjà construit
-    // (connectionManager.send()/multiplexer/connectionStatus) et n'a pas
-    // besoin d'être câblé dans son bloc .apply — le chat n'est écouté que
-    // pendant la durée de vie d'un streamChat() en cours, pas en permanence
-    // comme system/proactive/bridge (voir ChatStreamHandler.streamChat()).
-    private val chatStreamHandler by lazy { com.hasan.v1.network.ChatStreamHandler(connectionManager, connectionManager.multiplexer) }
+    // Chat : hermes-webui (REST/SSE), transport distinct du bridge WSS
+    // ci-dessus (canaux system/proactive/bridge, inchangés). Instance
+    // partagée avec HassanWakeWordService/WakeWordPipeline via
+    // WebUiClientHolder — un client HTTP + cookie n'a pas besoin d'une
+    // instance par composant comme la connexion WS état-pleine du bridge.
+    private val webUiRestClient = WebUiClientHolder.get(application)
+    private val webUiChatStream = WebUiChatStream(webUiRestClient)
+    private val webUiClarifyStream = WebUiClarifyStream(webUiRestClient)
+    private val webUiModelsClient = com.hasan.v1.webui.WebUiModelsClient(webUiRestClient)
+    private val webUiApprovalClient = com.hasan.v1.webui.WebUiApprovalClient(webUiRestClient)
+    private val webUiApprovalStream = com.hasan.v1.webui.WebUiApprovalStream(webUiRestClient)
+
+    // Clarify : flux SSE séparé du chat côté hermes-webui (contrairement à
+    // l'ancien chat/clarify, une enveloppe dans le même flux WS) — écouté en
+    // continu pour la session active, indépendamment d'un tour de chat en
+    // cours. Redémarré à chaque changement de session active (voir
+    // activateSession()/ensureActiveSession()/startPendingSession()).
+    private var clarifyJob: Job? = null
+
+    /**
+     * Le Flow SSE de [WebUiClarifyStream.stream] se termine (close()) sans
+     * lever d'exception dans la plupart des cas d'échec (HTTP non-2xx,
+     * coupure réseau normale) — la boucle while(isActive) doit donc
+     * redémarrer même quand collect{} revient normalement, pas seulement
+     * dans le catch. Backoff exponentiel identique à ConnectionManager
+     * (voir SseBackoff), reset à chaque event reçu (connexion vivante) —
+     * voir audit v2 B6.
+     */
+    private fun observeClarifyForSession(sessionId: String) {
+        clarifyJob?.cancel()
+        clarifyJob = viewModelScope.launch {
+            var attempt = 0
+            while (isActive) {
+                try {
+                    webUiClarifyStream.stream(sessionId).collect { prompt ->
+                        attempt = 0
+                        updateState {
+                            copy(
+                                pendingClarify = prompt?.let {
+                                    PendingClarify(
+                                        sessionId = sessionId,
+                                        clarifyId = it.clarifyId,
+                                        question = it.question,
+                                        choices = it.choicesOffered
+                                    )
+                                }
+                            )
+                        }
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "observeClarifyForSession: flux interrompu", e)
+                }
+                if (!isActive) break
+                delay(SseBackoff.delayForAttempt(attempt))
+                attempt++
+            }
+        }
+    }
+
+    // Approbations : flux SSE séparé côté hermes-webui (tools/approval.py),
+    // source unique depuis le retrait de l'event `approval` autrefois reçu
+    // inline dans /api/chat/stream (faisait doublon). Écouté en continu pour
+    // la session active, redémarré à chaque changement de session (mêmes
+    // points d'appel que observeClarifyForSession()).
+    private var approvalJob: Job? = null
+
+    /** Même schéma de reconnexion que observeClarifyForSession() — voir sa docstring. */
+    private fun observeApprovalsForSession(sessionId: String) {
+        approvalJob?.cancel()
+        approvalJob = viewModelScope.launch {
+            var attempt = 0
+            while (isActive) {
+                try {
+                    webUiApprovalStream.stream(sessionId).collect { approval ->
+                        attempt = 0
+                        updateState {
+                            copy(
+                                pendingApprovals = when {
+                                    approval == null -> pendingApprovals.filter { it.sessionId != sessionId }
+                                    pendingApprovals.any { it.approvalId == approval.approvalId } ->
+                                        pendingApprovals.map { if (it.approvalId == approval.approvalId) approval else it }
+                                    else -> pendingApprovals + approval
+                                }
+                            )
+                        }
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "observeApprovalsForSession: flux interrompu", e)
+                }
+                if (!isActive) break
+                delay(SseBackoff.delayForAttempt(attempt))
+                attempt++
+            }
+        }
+    }
+
+    /**
+     * Répond à une approbation en attente — POST /api/approval/respond.
+     * L'entrée est retirée localement dès l'envoi (pas d'attente du prochain
+     * event SSE) pour une UI réactive ; si le POST échoue, elle est
+     * réinsérée pour laisser l'utilisateur réessayer.
+     */
+    fun respondToApproval(approvalId: String, choice: com.hasan.v1.webui.models.ApprovalChoice) {
+        val pending = _uiState.value.pendingApprovals.firstOrNull { it.approvalId == approvalId } ?: return
+        updateState { copy(pendingApprovals = pendingApprovals.filter { it.approvalId != approvalId }) }
+        viewModelScope.launch {
+            val ok = webUiApprovalClient.respond(pending.sessionId, approvalId, choice)
+            if (!ok) {
+                updateState { copy(pendingApprovals = pendingApprovals + pending) }
+            }
+        }
+    }
 
     private fun activityTitleFor(status: RelayConnectionStatus): String = when (status) {
         RelayConnectionStatus.CONNECTED -> "Connexion relay établie"
@@ -198,30 +327,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var uiUpdateJob: Job? = null
     private var lastUserText: String = ""
 
-    /**
-     * UUID généré en mémoire au clic "+ Nouvelle Session" (voir startPendingSession()),
-     * PAS encore inséré en Room — création paresseuse : aucune entrée DB tant que
-     * l'utilisateur n'a pas envoyé son premier message avec succès (voir
-     * materializePendingSession(), déclenchée sur StreamEvent.Connected).
-     */
-    private var pendingSessionId: String? = null
+    /** stream_id du tour hermes-webui en cours, ou null si aucun run actif — alimente cancelActiveChat()/steer routing. */
+    private var activeStreamId: String? = null
 
     init {
         HassanSoundPlayer.init(application)
         LatencyLog.init(application)
         startHealthCheckLoop()
+        observeSessionExpiry()
         ttsManager.setVolume(settings.ttsVolume / 100f)
         ttsManager.setSpeed(settings.ttsSpeed)
         if (settings.ttsProvider.isNotBlank()) ttsManager.changeProvider(settings.ttsProvider)
         if (settings.ttsEngine.isNotBlank()) ttsManager.changeEngine(settings.ttsEngine)
         if (settings.ttsVoice.isNotBlank()) ttsManager.setVoice(settings.ttsVoice)
         updateState { copy(ttsOnline = ttsManager.isOnline) }
-        updateState { copy(relayPaired = sessionTokenStore.isPaired) }
+        updateState { copy(relayPaired = sessionTokenStore.isPaired, relayEnabled = settings.relayEnabled) }
+        refreshWebUiLoginState()
         viewModelScope.launch(Dispatchers.IO) { messageDao.deleteAllStreaming() }
         restoreLastConversation()
         ensureActiveSession()
         observeBackgroundConversationUpdates()
-        connectionManager.connect()
+        // Ne reconnecte au démarrage que si l'utilisateur n'a pas explicitement coupé le
+        // relay (switch Réglages) — sinon un simple redémarrage de l'app annulerait la pause.
+        if (settings.relayEnabled) connectionManager.connect()
+        loadAvailableModels()
+        syncSessionsFromServer()
+    }
+
+    /**
+     * Peuple Room avec les sessions connues du serveur mais absentes
+     * localement (ex: créée depuis un autre client hermes-webui) — upsert
+     * idempotent via sessionDao.insert() (REPLACE), jamais de suppression
+     * locale automatique pour ne pas perdre une session suite à une erreur
+     * réseau transitoire. Room reste la source d'affichage du drawer ;
+     * cette sync est un simple rattrapage au démarrage, pas un polling.
+     */
+    private fun syncSessionsFromServer() {
+        viewModelScope.launch {
+            val serverSessions = withContext(Dispatchers.IO) { webUiRestClient.listSessions() }
+            if (serverSessions.isEmpty()) return@launch
+            val localIds = sessionDao.getAll().first().map { it.id }.toSet()
+            serverSessions.filter { it.sessionId !in localIds }.forEach { summary ->
+                sessionDao.insert(
+                    HermesSession(
+                        id = summary.sessionId,
+                        name = summary.title?.takeIf { it.isNotBlank() } ?: "Session",
+                        isActive = false
+                    )
+                )
+            }
+        }
+    }
+
+    /** Charge le catalogue de modèles une fois au démarrage — voir WebUiModelsClient. */
+    private fun loadAvailableModels() {
+        viewModelScope.launch {
+            val catalog = webUiModelsClient.getModels() ?: return@launch
+            updateState {
+                copy(
+                    availableModels = catalog.groups.flatMap { it.models },
+                    selectedModel = settings.webUiSelectedModel.takeIf { it.isNotBlank() }
+                )
+            }
+        }
+    }
+
+    /** Change le modèle utilisé pour les prochains tours de chat — persisté via SettingsManager. */
+    fun selectModel(modelId: String) {
+        settings.webUiSelectedModel = modelId
+        updateState { copy(selectedModel = modelId) }
     }
 
     /**
@@ -285,13 +459,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.isListening) stopListening() else startListening()
     }
 
-    /** Envoi depuis le champ texte (mode clavier). */
+    /**
+     * Envoi depuis le champ texte (mode clavier). Si un tour est déjà en
+     * cours (activeStreamId non-null), le texte est injecté comme steer
+     * plutôt que d'attendre la fin du tour pour envoyer un nouveau message —
+     * cohérent avec la sémantique serveur ("steer is active-run guidance",
+     * voir WebUiRestClient.steerChat). Le steer n'interrompt pas le stream
+     * en cours : aucun changement de sttStatus/UI, juste une confirmation
+     * silencieuse ou un message d'erreur bref en cas de refus.
+     */
     fun sendTextMessage(text: String) {
         if (text.isBlank()) return
+        val streamId = activeStreamId
+        val sessionId = settings.activeSessionId
+        if (streamId != null && sessionId != null) {
+            steerActiveChat(sessionId, text)
+            return
+        }
         ttsBuffer.clear()
         tokenCount = 0
         updateState { copy(transcript = text, response = "", errorMessage = null, thinkingMessage = null) }
         sendToHermes(text)
+    }
+
+    /**
+     * Upload une pièce jointe (bytes déjà lus par l'appelant via
+     * ContentResolver — un content:// Android n'est pas un chemin fichier
+     * exploitable côté OkHttp/serveur) vers la session active, puis l'ajoute
+     * à [UiState.pendingAttachments]. Le fichier est déjà sur le serveur à ce
+     * stade (POST /api/upload) ; seul le prochain message envoyé la référence
+     * réellement dans la conversation (voir sendToHermes).
+     */
+    fun uploadAttachment(filename: String, mimeType: String, bytes: ByteArray) {
+        val sessionId = settings.activeSessionId ?: return
+        viewModelScope.launch {
+            updateState { copy(attachmentUploading = true) }
+            val result = withContext(Dispatchers.IO) {
+                webUiRestClient.uploadFile(sessionId, filename, mimeType, bytes)
+            }
+            if (result != null) {
+                updateState { copy(attachmentUploading = false, pendingAttachments = pendingAttachments + result) }
+            } else {
+                updateState { copy(attachmentUploading = false, errorMessage = "Envoi de \"$filename\" échoué") }
+            }
+        }
+    }
+
+    fun removePendingAttachment(attachment: com.hasan.v1.webui.models.UploadedAttachment) {
+        updateState { copy(pendingAttachments = pendingAttachments.filterNot { it.path == attachment.path }) }
+    }
+
+    private fun steerActiveChat(sessionId: String, text: String) {
+        viewModelScope.launch {
+            when (val result = withContext(Dispatchers.IO) { webUiRestClient.steerChat(sessionId, text) }) {
+                is WebUiSteerResult.Accepted ->
+                    LatencyLog.mark("STEER_ACCEPTED", result.streamId, text.take(80))
+                is WebUiSteerResult.Rejected -> {
+                    LatencyLog.mark("STEER_REJECTED", sessionId, result.fallback)
+                    updateState { copy(errorMessage = "Message non pris en compte (${result.fallback})") }
+                }
+                is WebUiSteerResult.NetworkError -> {
+                    LatencyLog.mark("STEER_NETWORK_ERROR", sessionId, result.message)
+                    updateState { copy(errorMessage = "Message non envoyé (hermes-webui injoignable)") }
+                }
+            }
+        }
     }
 
     // ─────────────────────────── STT callbacks ────────────────────────────
@@ -363,21 +595,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         else        sendWakeWordIntent(HassanWakeWordService.ACTION_PAUSE)
     }
 
-    /**
-     * Reçoit un message poussé par Hermes via SSE (app au premier plan).
-     * Persiste le message en DB et le lit via TTS si activé.
-     */
-    fun handlePushedMessage(content: String) {
-        viewModelScope.launch {
-            val convId = if (currentConversationId >= 0) currentConversationId
-                         else getOrCreateConversation("(push)")
-            messageDao.insert(
-                Message(conversationId = convId, role = "assistant", content = content)
-            )
-            if (settings.ttsEnabled) ttsManager.speak(content)
-        }
-    }
-
     /** Lit un message via TTS. Si messageId fourni, le tracked pour le bouton toggle. */
     fun readAloud(text: String, messageId: Long? = null) {
         ttsManager.stop()
@@ -391,8 +608,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateState { copy(ttsStatus = TtsStatus.IDLE, ttsPlayingMessageId = null) }
     }
 
+    /**
+     * true si RECORD_AUDIO est accordée — condition requise avant tout envoi d'intent au
+     * service wake word. Si le service n'est plus vivant (crash précédent, jamais démarré
+     * faute de permission), Android relance onCreate() pour traiter l'intent, qui appelle
+     * startForeground(FOREGROUND_SERVICE_TYPE_MICROPHONE) : sans RECORD_AUDIO, targetSdk 35
+     * lève une SecurityException fatale non rattrapable depuis l'appelant (observé en crash
+     * direct en changeant le modèle/la sensibilité du wake word sans la permission accordée).
+     */
+    private fun hasRecordAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+
     fun swapWakeWordModel(modelPath: String) {
         settings.wakeWordModel = modelPath
+        if (!hasRecordAudioPermission()) return
         getApplication<Application>().startService(
             Intent(getApplication(), HassanWakeWordService::class.java).apply {
                 action = HassanWakeWordService.ACTION_SWAP_MODEL
@@ -401,12 +631,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    /** Health check applicatif Hermes via le relay (chat/health) — utilisé par le bouton "Tester la connexion" des Réglages. */
-    suspend fun checkHealthViaRelay(): HealthResult = chatStreamHandler.checkHealth()
+    /** Health check hermes-webui (GET /health) — utilisé par le bouton "Tester la connexion" des Réglages. */
 
     fun setWakeWordSensitivity(value: Float) {
+        if (settings.wakeWordSensitivity == value) return
         settings.wakeWordSensitivity = value
-        // TODO : envoyer l'intent ACTION_SET_THRESHOLD quand le service le supportera
+        if (!hasRecordAudioPermission()) return
+        // Recrée l'engine côté service (hot-swap, cf swapWakeWordModel) — WakeWordModel.threshold
+        // est immuable, pas de setter en cours de route côté lib openwakeword.
+        getApplication<Application>().startService(
+            Intent(getApplication(), HassanWakeWordService::class.java).apply {
+                action = HassanWakeWordService.ACTION_SET_SENSITIVITY
+                putExtra(HassanWakeWordService.EXTRA_SENSITIVITY, value)
+            }
+        )
     }
 
     fun changeTtsProvider(provider: String) {
@@ -446,13 +684,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ttsManager.setSpeed(speed)
     }
 
-    fun applyConnectionSettings(url: String, token: String, model: String, customModel: String) {
-        settings.serverUrl   = url
-        settings.authToken   = token
-        settings.model       = model
-        settings.customModel = customModel
-    }
-
     // ─────────────────────────── Logique interne ──────────────────────────
 
     private fun startListening() {
@@ -474,20 +705,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateState { copy(isListening = false, sttStatus = SttStatus.IDLE) }
     }
 
-    /** Approuve le certificat TOFU et rejoue le dernier message utilisateur. */
-    fun trustCertAndRetry(fingerprint: String) {
-        settings.setTrustedCertFingerprint(
-            com.hasan.v1.network.models.certStorageKey(settings.serverUrl), fingerprint
-        )
-        updateState { copy(errorMessage = null) }
-        if (lastUserText.isNotBlank()) {
-            currentConversationId = -1
-            sendToHermes(lastUserText)
-        }
-    }
-
     fun clearError() {
-        updateState { copy(errorMessage = null, errorType = null) }
+        updateState { copy(errorMessage = null, errorType = null, relayErrorMessage = null) }
     }
 
     /** Réessaye le dernier message utilisateur (bouton "Réessayer" sur bulle erreur). */
@@ -519,10 +738,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // Session effective : active si elle existe déjà, sinon la session pending
-            // (création paresseuse — voir startPendingSession()). Rien n'est encore
-            // inséré en Room à ce stade pour la branche pending.
-            val effectiveSessionId = settings.activeSessionId ?: pendingSessionId ?: run {
+            // La session existe toujours déjà en Room à ce stade — créée côté
+            // serveur dès "+ Nouvelle session" (voir startPendingSession()),
+            // plus de création paresseuse ici (hermes-webui génère le
+            // session_id serveur, contrairement à l'ancien UUID local).
+            val effectiveSessionId = settings.activeSessionId ?: run {
                 updateState { copy(sttStatus = SttStatus.IDLE, errorMessage = "Aucune session active") }
                 return@launch
             }
@@ -530,11 +750,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val turn = streamStartTime.toString()
             LatencyLog.mark("SEND", turn, "sessionId=$effectiveSessionId user=${userText.take(80)}")
 
-            // convId/streamingMessageId matérialisés dans la branche Connected ci-dessous
-            // (pas avant l'appel réseau) — voir materializePendingSession(). Tant que
-            // Connected n'est pas reçu, aucune session/conversation/message n'est
-            // persisté, pour ne rien laisser d'orphelin si le réseau échoue.
-            var convId = -1L
+            updateState { copy(sttStatus = SttStatus.SENDING) }
+
+            val attachmentsForThisTurn = _uiState.value.pendingAttachments
+            // Le champ attachments[] du payload sert uniquement à l'embed natif
+            // multimodal côté serveur pour les images (voir
+            // _build_native_multimodal_message, api/streaming.py) — pour un
+            // fichier non-image, le serveur ne fait QUE le stocker sur la
+            // session, sans jamais le mentionner au modèle. Le vrai frontend
+            // web (static/messages.js) suffixe donc le texte du message avec
+            // les chemins, seul moyen pour le modèle de savoir qu'un fichier
+            // existe et d'aller le lire via ses outils — sans ce suffixe le
+            // modèle répond "je ne vois aucun fichier joint" (bug confirmé en
+            // conditions réelles).
+            val messageForThisTurn = buildMessageWithAttachments(userText, attachmentsForThisTurn)
+            val streamId = withContext(Dispatchers.IO) {
+                webUiRestClient.startChat(
+                    effectiveSessionId,
+                    messageForThisTurn,
+                    settings.webUiSelectedModel.takeIf { it.isNotBlank() },
+                    attachmentsForThisTurn
+                )
+            }
+            if (streamId == null) {
+                updateState { copy(
+                    sttStatus = SttStatus.IDLE,
+                    errorMessage = "Envoi impossible (hermes-webui injoignable)",
+                    errorType = ErrorType.HERMES_UNREACHABLE,
+                    connectionStatus = ConnectionStatus.DISCONNECTED
+                ) }
+                return@launch
+            }
+            activeStreamId = streamId
+            if (attachmentsForThisTurn.isNotEmpty()) {
+                updateState { copy(pendingAttachments = emptyList()) }
+            }
+
+            // Point d'insertion Room : au premier plan, juste après un
+            // startChat() réussi (avant l'ancien StreamEvent.Connected, qui
+            // n'a pas d'équivalent en HTTP one-shot — pas de phase
+            // "connecting" séparée avec ce transport).
+            val convId = getOrCreateConversation(userText)
+            if (retryCount == 0) {
+                messageDao.insert(Message(conversationId = convId, role = "user", content = userText))
+            }
+            streamingBuffer.clear()
+            if (streamingMessageId >= 0) {
+                messageDao.deleteById(streamingMessageId)
+                streamingMessageId = -1
+            }
+            streamingMessageId = messageDao.insert(
+                Message(conversationId = convId, role = "assistant", content = "", isStreaming = true)
+            )
+
+            // Throttle UI : flush la DB toutes les 100ms pour un scroll fluide
+            val flushConvId = convId
+            uiUpdateJob?.cancel()
+            uiUpdateJob = viewModelScope.launch(Dispatchers.IO) {
+                while (true) {
+                    delay(100)
+                    val msgId = streamingMessageId
+                    if (msgId < 0) break
+                    val snapshot = synchronized(streamingBuffer) { streamingBuffer.toString() }
+                    if (snapshot.isNotEmpty()) {
+                        messageDao.update(Message(
+                            id = msgId,
+                            conversationId = flushConvId,
+                            role = "assistant",
+                            content = snapshot,
+                            isStreaming = true
+                        ))
+                        LatencyLog.mark("DB_FLUSH", turn, "len=${snapshot.length}")
+                    }
+                }
+            }
+
+            updateState { copy(
+                sttStatus = SttStatus.STREAMING,
+                connectionStatus = ConnectionStatus.CONNECTED,
+                errorMessage = null,
+                errorType = null
+            ) }
 
             // reachedTerminal : filet de sécurité contre un flow qui se termine (fin
             // normale ou exception) sans jamais émettre Done/Error — auparavant un tel
@@ -542,87 +838,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // aucun message d'erreur pour l'utilisateur (voir turn=1784139600101).
             var reachedTerminal = false
             try {
-            chatStreamHandler.streamChat(effectiveSessionId, userText).collect { event ->
+            webUiChatStream.stream(streamId, effectiveSessionId).collect { event ->
                 when (event) {
-                    StreamEvent.Connecting ->
-                        updateState { copy(sttStatus = SttStatus.SENDING) }
+                    is WebUiStreamEvent.Tool ->
+                        updateState { copy(thinkingMessage = toolDisplayMessage(event.name)) }
 
-                    StreamEvent.Connected -> {
-                        materializePendingSession(userText)
-                        convId = getOrCreateConversation(userText)
-                        // N'insère le message utilisateur qu'au premier essai
-                        if (retryCount == 0) {
-                            messageDao.insert(
-                                Message(conversationId = convId, role = "user", content = userText)
-                            )
-                        }
-
-                        streamingBuffer.clear()
-                        if (streamingMessageId >= 0) {
-                            messageDao.deleteById(streamingMessageId)
-                            streamingMessageId = -1
-                        }
-                        streamingMessageId = messageDao.insert(
-                            Message(conversationId = convId, role = "assistant", content = "", isStreaming = true)
+                    is WebUiStreamEvent.ToolComplete -> {
+                        // Signale la fin d'un outil (succès/échec/durée) — jusqu'ici jamais
+                        // reçu côté client (event tool_complete non géré avant l'étape 4.4),
+                        // l'app ne savait jamais qu'un outil avait fini. Pas de nouvelle UI
+                        // dédiée : on efface juste le thinkingMessage en cas d'échec pour ne
+                        // pas laisser "Hasan utilise X..." affiché indéfiniment si le tour
+                        // continue avec un nouvel outil ensuite (le prochain event Tool le
+                        // remplacera de toute façon, mais un échec silencieux ne devrait pas
+                        // laisser un message obsolète affiché plus longtemps que nécessaire).
+                        LatencyLog.mark(
+                            if (event.isError) "TOOL_COMPLETE_ERROR" else "TOOL_COMPLETE",
+                            turn,
+                            "name=${event.name} duration=${event.durationMs}"
                         )
+                        if (event.isError) updateState { copy(thinkingMessage = null) }
+                    }
 
-                        // Throttle UI : flush la DB toutes les 100ms pour un scroll fluide
-                        val flushConvId = convId
-                        uiUpdateJob?.cancel()
-                        uiUpdateJob = viewModelScope.launch(Dispatchers.IO) {
-                            while (true) {
-                                delay(100)
-                                val msgId = streamingMessageId
-                                if (msgId < 0) break
-                                val snapshot = synchronized(streamingBuffer) { streamingBuffer.toString() }
-                                if (snapshot.isNotEmpty()) {
-                                    messageDao.update(Message(
-                                        id = msgId,
-                                        conversationId = flushConvId,
-                                        role = "assistant",
-                                        content = snapshot,
-                                        isStreaming = true
-                                    ))
-                                    LatencyLog.mark("DB_FLUSH", turn, "len=${snapshot.length}")
-                                }
-                            }
+                    is WebUiStreamEvent.PendingSteerLeftover -> {
+                        // Un /steer accepté trop tard (le tour a fini avant qu'il ne soit
+                        // consommé) — le serveur renvoie le texte pour qu'on le renvoie au
+                        // prochain tour plutôt que de le perdre silencieusement.
+                        LatencyLog.mark("STEER_LEFTOVER", turn, event.text.take(200))
+                        lastUserText = event.text
+                    }
+
+                    is WebUiStreamEvent.Title -> {
+                        // Titre généré par LLM en tâche de fond (voir
+                        // api/streaming.py _run_background_title_update),
+                        // remplace le titre local tronqué (80 premiers
+                        // caractères du message utilisateur) une fois le
+                        // vrai titre serveur disponible.
+                        LatencyLog.mark("TITLE_GENERATED", turn, event.title)
+                        conversationDao.getById(convId)?.let { conv ->
+                            conversationDao.update(conv.copy(title = event.title))
                         }
-
-                        updateState { copy(
-                            sttStatus = SttStatus.STREAMING,
-                            connectionStatus = ConnectionStatus.CONNECTED,
-                            errorMessage = null,
-                            errorType = null
-                        ) }
+                        sessionDao.getById(effectiveSessionId)?.let { session ->
+                            sessionDao.update(session.copy(name = event.title))
+                        }
                     }
 
-                    is StreamEvent.Thinking ->
-                        updateState { copy(thinkingMessage = event.message) }
-
-                    is StreamEvent.ClarifyPrompt -> {
-                        // Pas de reachedTerminal=true ici : le tour reste ouvert côté
-                        // serveur (callback bloquant en attente de la réponse utilisateur,
-                        // voir ChatStreamHandler.sendClarifyResponse) — le collect continue
-                        // de tourner, soit les tokens reprendront après la réponse, soit un
-                        // StreamEvent.Error (clarify_expired) arrivera si le délai expire.
-                        LatencyLog.mark("CLARIFY_SHOWN", turn, "clarifyId=${event.clarifyId}")
-                        updateState { copy(
-                            thinkingMessage = null,
-                            pendingClarify = PendingClarify(
-                                sessionId = effectiveSessionId,
-                                clarifyId = event.clarifyId,
-                                question = event.question,
-                                choices = event.choices
+                    is WebUiStreamEvent.Cancel -> {
+                        reachedTerminal = true
+                        uiUpdateJob?.cancel()
+                        uiUpdateJob = null
+                        // Le placeholder streaming garde le texte déjà reçu (pas de perte du
+                        // partiel affiché) — juste marqué non-streaming, contrairement à
+                        // AppError qui supprime le placeholder (un cancel est volontaire, pas
+                        // un échec : la réponse partielle reste utile à l'utilisateur).
+                        val partialText = streamingBuffer.toString()
+                        if (streamingMessageId >= 0 && partialText.isNotBlank()) {
+                            messageDao.update(
+                                Message(
+                                    id = streamingMessageId,
+                                    conversationId = convId,
+                                    role = "assistant",
+                                    content = partialText,
+                                    isStreaming = false
+                                )
                             )
-                        ) }
+                        } else if (streamingMessageId >= 0) {
+                            messageDao.deleteById(streamingMessageId)
+                        }
+                        streamingMessageId = -1
+                        LatencyLog.mark("CANCEL", turn, event.message)
+                        LatencyLog.clear(turn)
+                        updateState { copy(sttStatus = SttStatus.IDLE, thinkingMessage = null) }
                     }
 
-                    is StreamEvent.Token -> {
+                    is WebUiStreamEvent.StreamEnd -> {
+                        // Vrai signal de fermeture de connexion SSE — peut suivre Done/Cancel/
+                        // AppError (déjà traités, reachedTerminal=true) ou survenir seul sur
+                        // certains chemins serveur. Le garde-fou reachedTerminal évite un
+                        // double traitement si Done l'a déjà marqué.
+                        if (!reachedTerminal) {
+                            reachedTerminal = true
+                            uiUpdateJob?.cancel()
+                            uiUpdateJob = null
+                            updateState { copy(sttStatus = SttStatus.IDLE, thinkingMessage = null) }
+                        }
+                    }
+
+                    is WebUiStreamEvent.Token -> {
                         synchronized(streamingBuffer) { streamingBuffer.append(event.text) }
                         updateState { copy(response = response + event.text, thinkingMessage = null) }
                     }
 
-                    is StreamEvent.Done -> {
+                    is WebUiStreamEvent.Done -> {
                         reachedTerminal = true
                         uiUpdateJob?.cancel()
                         uiUpdateJob = null
@@ -647,8 +954,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             LatencyLog.mark("DONE_CONTENT", turn, responseText.take(200))
                         }
                         LatencyLog.clear(turn)
-                        val metadata = if (event.inputTokens > 0 || event.outputTokens > 0) {
-                            """{"response_id":"${event.responseId ?: ""}","input_tokens":${event.inputTokens},"output_tokens":${event.outputTokens},"duration_ms":$durationMs}"""
+                        // Pas de responseId chaîné (jamais le cas non plus avec l'ancien
+                        // transport — le contexte est porté par session_id uniquement,
+                        // confirmé côté hermes-webui : POST /api/chat/start {session_id,
+                        // message} sans previous_response_id).
+                        val inputTokens = event.usageRaw?.optInt("input_tokens", 0) ?: 0
+                        val outputTokens = event.usageRaw?.optInt("output_tokens", 0) ?: 0
+                        val metadata = if (inputTokens > 0 || outputTokens > 0) {
+                            """{"input_tokens":$inputTokens,"output_tokens":$outputTokens,"duration_ms":$durationMs}"""
                         } else null
                         if (streamingMessageId >= 0) {
                             messageDao.update(
@@ -667,15 +980,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         settings.activeSessionId?.let { sessionDao.touchSession(it) }
                         streamingMessageId = -1
-                        updateState { copy(sttStatus = SttStatus.IDLE, pendingClarify = null) }
+                        updateState { copy(sttStatus = SttStatus.IDLE) }
                         if (responseText.isNotBlank() && !isAppInForeground()) {
-                            HassanNotificationService.notifyMessage(
+                            com.hasan.v1.utils.NotificationHelper.notifyMessage(
                                 getApplication(), responseText
                             )
                         }
                     }
 
-                    is StreamEvent.Error -> {
+                    is WebUiStreamEvent.AppError -> {
                         reachedTerminal = true
                         uiUpdateJob?.cancel()
                         uiUpdateJob = null
@@ -689,20 +1002,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         // masquée par une tentative de récupération silencieuse — un ancien
                         // retry pouvait laisser le tour bloqué indéfiniment sans aucune trace
                         // ni pour l'utilisateur ni dans les logs (voir turn=1784139600101).
-                        LatencyLog.mark("ERROR", turn, event.type.name)
+                        // Pas de ErrorType distingué côté serveur hermes-webui (contrairement
+                        // à l'ancien relay) — un seul type générique, NO_NETWORK reste géré
+                        // localement en amont via hasNetwork().
+                        LatencyLog.mark("ERROR", turn, event.message.take(200))
                         LatencyLog.clear(turn)
                         updateState { copy(
                             sttStatus = SttStatus.IDLE,
                             errorMessage = event.message,
-                            errorType = event.type,
-                            connectionStatus = ConnectionStatus.DISCONNECTED,
-                            pendingClarify = null
+                            errorType = ErrorType.SERVER_ERROR,
+                            connectionStatus = ConnectionStatus.DISCONNECTED
                         ) }
-                    }
-
-                    is StreamEvent.CertificateCheck -> {
-                        reachedTerminal = true
-                        updateState { copy(sttStatus = SttStatus.IDLE, errorMessage = "CERT:${event.isChanged}:${event.fingerprint}:${event.storedFingerprint ?: ""}") }
                     }
                 }
             }
@@ -719,29 +1029,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         sttStatus = SttStatus.IDLE,
                         errorMessage = "Connexion interrompue",
                         errorType = ErrorType.STREAM_INTERRUPTED,
-                        connectionStatus = ConnectionStatus.DISCONNECTED,
-                        pendingClarify = null
+                        connectionStatus = ConnectionStatus.DISCONNECTED
                     ) }
                 }
+                // Le tour est terminé quelle que soit l'issue (Done/AppError/
+                // Cancel/StreamEnd/orphelin) — plus de run actif à annuler.
+                activeStreamId = null
             }
         }
     }
 
     /**
-     * Répond à une clarification en cours ([UiState.pendingClarify]) — envoie la réponse
-     * via le WS existant (voir ChatStreamHandler.sendClarifyResponse), le tour de chat
-     * en cours gère la suite lui-même (reprise des tokens ou StreamEvent.Error si expiré).
+     * Annule le tour hermes-webui en cours (bouton Stop du Chat, distinct de
+     * stopTts() qui coupe seulement la synthèse vocale locale). L'event SSE
+     * `cancel` arrive ensuite naturellement dans le flux déjà ouvert par
+     * sendToHermes() — pas besoin de fermer manuellement le flow ici.
+     */
+    fun cancelActiveChat() {
+        val streamId = activeStreamId ?: return
+        viewModelScope.launch {
+            val cancelled = withContext(Dispatchers.IO) { webUiRestClient.cancelChat(streamId) }
+            LatencyLog.mark(if (cancelled) "CANCEL_REQUESTED_OK" else "CANCEL_REQUESTED_FAILED", streamId, "")
+        }
+    }
+
+    /**
+     * Répond à une clarification en cours ([UiState.pendingClarify]) — POST
+     * /api/clarify/respond (suspend, contrairement à l'ancien envoi
+     * fire-and-forget sur le WS relay). Le prompt disparaît de
+     * [UiState.pendingClarify] via [observeClarifyForSession] (flux SSE
+     * clarify séparé, pas mis à null ici directement) une fois le serveur
+     * notifié de la résolution.
      */
     fun respondToClarify(response: String) {
         val pending = _uiState.value.pendingClarify ?: return
-        updateState { copy(pendingClarify = null, sttStatus = SttStatus.SENDING) }
-        val sendOk = chatStreamHandler.sendClarifyResponse(pending.sessionId, pending.clarifyId, response)
-        if (!sendOk) {
-            updateState { copy(
-                sttStatus = SttStatus.IDLE,
-                errorMessage = "Relay non connecté",
-                errorType = ErrorType.HERMES_UNREACHABLE
-            ) }
+        updateState { copy(sttStatus = SttStatus.SENDING) }
+        viewModelScope.launch {
+            val ok = webUiRestClient.respondClarify(pending.sessionId, pending.clarifyId, response)
+            if (!ok) {
+                updateState { copy(
+                    sttStatus = SttStatus.IDLE,
+                    errorMessage = "Réponse à la clarification échouée (peut-être expirée)",
+                    errorType = ErrorType.HERMES_UNREACHABLE
+                ) }
+            }
         }
     }
 
@@ -813,8 +1144,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * serverConnected ne reflète QUE la joignabilité applicative de Hermes (chat/health,
-     * un aller-retour HTTP en amont du relay, timeout 8-10s) — il ne doit jamais piloter
+     * serverConnected ne reflète QUE la joignabilité applicative de hermes-webui
+     * (GET /health, requête HTTP one-shot) — il ne doit jamais piloter
      * connectionStatus, qui est le vrai état du WebSocket (déjà géré par l'observation de
      * connectionManager.connectionStatus, voir le bloc .apply de connectionManager).
      * Avant ce fix, un simple ralentissement de Hermes (observé en pratique : Hermes peut
@@ -826,14 +1157,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startHealthCheckLoop() {
         healthJob = viewModelScope.launch {
             while (true) {
-                val connected = chatStreamHandler.checkHealth() == HealthResult.Ok
-                updateState { copy(serverConnected = connected) }
+                val connected = webUiRestClient.checkHealth() == WebUiHealthResult.Ok
+                updateState { copy(serverConnected = connected, webUiLoggedIn = !settings.webUiSessionCookie.isNullOrBlank()) }
                 delay(10_000)
             }
         }
     }
 
+    /**
+     * Resynchronise webUiLoggedIn immédiatement après une connexion réussie
+     * (Réglages > connexion manuelle, ou pairing QR) — sans attendre le
+     * prochain tick de startHealthCheckLoop (jusqu'à 10s de latence sinon,
+     * pendant lesquelles le champ de saisie resterait à tort désactivé).
+     */
+    fun refreshWebUiLoginState() {
+        updateState { copy(webUiLoggedIn = !settings.webUiSessionCookie.isNullOrBlank()) }
+    }
+
+    /**
+     * webUiLoggedIn ne dépendait jusqu'ici que de la présence locale du
+     * cookie (GET /health est un endpoint public, incapable de détecter une
+     * expiration de session) — un vrai rejet HTTP 401 serveur, détecté par
+     * n'importe quel client webui/ via WebUiRestClient.executeAuthed, met
+     * désormais à jour l'état immédiatement (voir audit v2 B7).
+     */
+    private fun observeSessionExpiry() {
+        viewModelScope.launch {
+            webUiRestClient.authStore.sessionExpired.collect {
+                updateState {
+                    copy(
+                        webUiLoggedIn = false,
+                        errorMessage = "Session hermes-webui expirée — reconnexion nécessaire",
+                        relayErrorMessage = "Session hermes-webui expirée — reconnexion nécessaire"
+                    )
+                }
+            }
+        }
+    }
+
     fun sendWakeWordIntent(action: String) {
+        // Le service n'est peut-être plus vivant (tué par l'OS, crash précédent) : n'importe
+        // quel startService() ici peut déclencher onCreate() → startForeground(MICROPHONE),
+        // donc le même garde-fou que swapWakeWordModel/setWakeWordSensitivity s'applique.
+        if (!hasRecordAudioPermission()) return
         getApplication<Application>().startService(
             Intent(getApplication(), HassanWakeWordService::class.java).apply {
                 this.action = action
@@ -892,6 +1258,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 startPendingSession()
             } else {
                 settings.activeSessionId = active.id
+                observeClarifyForSession(active.id)
+                observeApprovalsForSession(active.id)
                 // Recharge la conversation Room liée à cette session
                 val conv = conversationDao.getBySessionId(active.id)
                 if (conv != null) {
@@ -904,47 +1272,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Point d'entrée "+ Nouvelle Session" (drawer) — création paresseuse : génère un
-     * UUID en mémoire, n'insère RIEN en Room tant que le premier message n'a pas été
-     * envoyé avec succès (voir materializePendingSession()). Annule tout tour en cours.
+     * Point d'entrée "+ Nouvelle Session" (drawer) — création immédiate côté
+     * serveur (POST /api/session/new) : hermes-webui génère le session_id,
+     * contrairement à l'ancien UUID local généré paresseusement au premier
+     * message (voir git history pour l'ancien mécanisme materializePendingSession).
+     * Le titre par défaut est ajusté au premier message envoyé (voir
+     * getOrCreateConversation, le titre Conversation reste local — hermes-webui
+     * n'a pas de titrage automatique serveur, confirmé en étape 3).
      */
     fun startPendingSession() {
         streamJob?.cancel()
-        pendingSessionId = java.util.UUID.randomUUID().toString()
         currentConversationId = -1
         settings.activeSessionId = null
-        LatencyLog.mark("PENDING_START", pendingSessionId!!)
         updateState { copy(resumedConversationId = null, transcript = "", response = "", errorMessage = null, errorType = null) }
-    }
-
-    /**
-     * Matérialise pendingSessionId en une vraie session Room, déclenchée sur
-     * StreamEvent.Connected (le relay a accepté le tour) — pas avant, pour ne rien
-     * persister si le réseau échoue (voir sendToHermes()). Titre dérivé localement
-     * du premier message (25 premiers caractères + "…" si tronqué) — confirmé auprès
-     * de Hermes qu'aucun titrage automatique serveur n'est disponible via /v1/responses
-     * (maybe_auto_title n'existe que côté gateway Telegram/Discord, pas l'API server ;
-     * un titrage via appel LLM dédié depuis le relay ajouterait latence/coût pour un
-     * gain jugé mineur par Hermes lui-même — recommandation : gérer le titre localement).
-     */
-    private suspend fun materializePendingSession(firstUserText: String) {
-        val pending = pendingSessionId
-        if (pending == null) {
-            // Ne devrait pas arriver : Connected implique soit une session deja active
-            // (settings.activeSessionId non-null, cf. sendToHermes), soit une session
-            // pending non consommee. Si ce cas se produit, il faut le voir dans les logs.
-            LatencyLog.mark("MATERIALIZE_SKIP", "none", "activeSessionId=${settings.activeSessionId}")
-            return
+        viewModelScope.launch {
+            val sessionId = webUiRestClient.createSession()
+            if (sessionId == null) {
+                LatencyLog.mark("SESSION_CREATE_FAILED", "none", "")
+                updateState { copy(errorMessage = "Création de session impossible (hermes-webui injoignable)") }
+                return@launch
+            }
+            val session = HermesSession(id = sessionId, name = "Nouvelle session", isActive = true)
+            sessionDao.deactivateAll()
+            sessionDao.insert(session)
+            settings.activeSessionId = sessionId
+            observeClarifyForSession(sessionId)
+            observeApprovalsForSession(sessionId)
+            LatencyLog.mark("SESSION_CREATED", sessionId, "")
         }
-        val name = firstUserText.trim().take(25).let {
-            if (firstUserText.trim().length > 25) "$it…" else it
-        }.ifBlank { "Nouvelle session" }
-        val session = HermesSession(id = pending, name = name, isActive = true)
-        sessionDao.deactivateAll()
-        sessionDao.insert(session)
-        settings.activeSessionId = session.id
-        LatencyLog.mark("MATERIALIZE", pending, "name=${session.name}")
-        pendingSessionId = null
     }
 
     /** Retourne l'ID de session actif (depuis cache SharedPrefs). */
@@ -961,6 +1316,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             sessionDao.deactivateAll()
             sessionDao.activateById(session.id)
             settings.activeSessionId = session.id
+            observeClarifyForSession(session.id)
+            observeApprovalsForSession(session.id)
 
             val conv = conversationDao.getBySessionId(session.id)
             if (conv != null) {
@@ -972,13 +1329,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Room reste la source d'affichage immédiat (rename optimiste), le
+     * serveur est mis à jour en tâche de fond — en cas d'échec réseau, pas
+     * de rollback local (log seulement), cohérent avec le reste du client
+     * qui ne fait pas de reconciliation complexe. Jusqu'ici cet appel ne
+     * touchait QUE Room, jamais POST /api/session/rename — le nom changé
+     * dans le drawer n'existait donc que localement (bug pré-existant,
+     * corrigé étape 4.4).
+     */
     fun renameSession(session: HermesSession, newName: String) {
         viewModelScope.launch {
             sessionDao.update(session.copy(name = newName))
+            val ok = withContext(Dispatchers.IO) { webUiRestClient.renameSession(session.id, newName) }
+            if (!ok) LatencyLog.mark("SESSION_RENAME_SERVER_FAILED", session.id, newName.take(80))
         }
     }
 
-    /** Supprime une session locale. */
+    /**
+     * Supprime une session locale ET côté serveur — jusqu'ici cet appel ne
+     * touchait QUE Room, la session continuait d'exister sur le VPS (bug
+     * pré-existant, corrigé étape 4.4).
+     */
     fun deleteSession(session: HermesSession) {
         viewModelScope.launch {
             sessionDao.delete(session)
@@ -986,6 +1358,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val remaining = sessionDao.getActive()
                 if (remaining == null) startPendingSession()
             }
+            val ok = withContext(Dispatchers.IO) { webUiRestClient.deleteSession(session.id) }
+            if (!ok) LatencyLog.mark("SESSION_DELETE_SERVER_FAILED", session.id, "")
         }
     }
 
@@ -994,6 +1368,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         streamJob?.cancel()
         healthJob?.cancel()
         uiUpdateJob?.cancel()
+        clarifyJob?.cancel()
         ttsManager.release()
         HassanSoundPlayer.release()
         bargeInListener.stop()
@@ -1002,42 +1377,155 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ─────────────────────────── Relay (WebSocket) ─────────────────────────
 
-    /** Approuve le certificat TOFU du relay et retente la connexion. */
+    /**
+     * Approuve le certificat TOFU du relay. Deux cas distincts selon l'origine du
+     * CertificateCheckRequired, qui déterminent aussi QUEL trust store approuver :
+     * - Reconnexion normale (relayServerUrl/relaySessionToken déjà écrits d'un pairing
+     *   antérieur) : connectionManager.trustCertificate() calcule sa clé de stockage à
+     *   partir de settings.relayServerUrl (déjà à jour) — puis connect() suffit,
+     *   [pendingPairing] est null dans ce cas.
+     * - Certificat découvert PENDANT un pairing (QR ou manuel, voir handlePairingResult) :
+     *   settings.relayServerUrl n'est PAS encore écrit à ce stade — passe par
+     *   [PairingManager.completePairingAfterCertTrust], qui persiste directement le
+     *   session_token déjà obtenu par le premier appel plutôt que de retenter avec le
+     *   code de pairing (à usage unique, déjà consommé côté serveur — un retry échouerait
+     *   en "invalid_or_expired_code").
+     */
     fun trustRelayCertAndRetry(fingerprint: String) {
-        connectionManager.trustCertificate(fingerprint)
         updateState { copy(relayCertCheck = null) }
-        connectionManager.connect()
+        val pending = pendingPairing
+        if (pending != null) {
+            pendingPairing = null
+            viewModelScope.launch {
+                handlePairingResult(pairingManager.completePairingAfterCertTrust(pending, fingerprint))
+            }
+        } else {
+            connectionManager.trustCertificate(fingerprint)
+            connectionManager.connect()
+        }
     }
 
     fun dismissRelayCertCheck() {
+        pendingPairing = null
         updateState { copy(relayCertCheck = null) }
     }
 
     /** Point d'entrée pairing — [qrText] est le contenu déjà décodé d'un QR (scan fait par l'appelant, voir étape 9). */
+    /** Le scan QR (QrScannerActivity) a été annulé avant de produire un texte — voir EXTRA_QR_ERROR. */
+    fun reportQrScanError(reason: String?) {
+        val message = when (reason) {
+            "permission_denied" -> "Caméra refusée — pairing annulé"
+            "camera_bind_failed" -> "Caméra indisponible — pairing annulé"
+            else -> "Scan QR annulé"
+        }
+        updateState { copy(relayErrorMessage = message) }
+    }
+
     fun pairFromQr(qrText: String) {
         viewModelScope.launch {
-            when (val result = pairingManager.pairFromQrContent(qrText)) {
-                is PairingManager.PairingResult.Success -> {
-                    updateState { copy(relayPaired = true, errorMessage = null) }
-                    connectionManager.connect()
-                }
-                is PairingManager.PairingResult.CertificateCheckRequired -> {
-                    updateState { copy(relayCertCheck = result.certCheck) }
-                }
-                is PairingManager.PairingResult.InvalidQrContent -> {
-                    updateState { copy(errorMessage = "QR de pairing invalide : ${result.reason}") }
-                }
-                is PairingManager.PairingResult.ServerRejected -> {
-                    updateState { copy(errorMessage = "Pairing refusé (${result.httpCode}) : ${result.error}") }
-                }
-                is PairingManager.PairingResult.NetworkError -> {
-                    updateState { copy(errorMessage = "Pairing impossible : ${result.message}") }
+            val result = pairingManager.pairFromQrContent(qrText)
+            handlePairingResult(result)
+            if (result is PairingManager.PairingResult.Success) {
+                // Configure hermes-webui (chat) si le QR portait aussi ces champs —
+                // absent d'un QR généré sans WEBUI_URL/WEBUI_PASSWORD côté
+                // hermes-relay.service, auquel cas le pairing bridge reste valide
+                // sans configurer le chat. Non applicable au pairing manuel
+                // (saisie relayUrl/code seuls, voir pairManually).
+                if (result.webUiUrl != null && result.webUiPassword != null) {
+                    settings.webUiServerUrl = result.webUiUrl
+                    val loginResult = webUiRestClient.login(result.webUiPassword)
+                    if (loginResult !is WebUiLoginResult.Ok) {
+                        Log.w(TAG, "Login hermes-webui après pairing QR échoué : $loginResult")
+                        updateState { copy(relayErrorMessage = "Pairing bridge OK, mais connexion chat hermes-webui échouée") }
+                    } else {
+                        refreshWebUiLoginState()
+                    }
                 }
             }
         }
     }
 
+    /** Point d'entrée pairing manuel (Réglages → Relay bridge → saisie URL + code) — sans QR. */
+    fun pairManually(relayUrl: String, code: String) {
+        viewModelScope.launch {
+            handlePairingResult(pairingManager.pair(relayUrl, code))
+        }
+    }
+
+    /** Déconnecte hermes-webui (chat) — invalide le cookie de session, indépendant du relay. */
+    fun disconnectWebUi() {
+        webUiRestClient.authStore.clear()
+        updateState { copy(webUiLoggedIn = false) }
+    }
+
+    /**
+     * Dépairing complet du relay (bouton dédié, accordéon manuel) — détruit le
+     * token, contrairement à [setRelayEnabled] qui ne fait que suspendre la
+     * connexion WS. Un pairing (QR ou manuel) est requis pour reconnecter ensuite.
+     */
+    fun disconnectRelayCompletely() {
+        sessionTokenStore.clear()
+        connectionManager.disconnect()
+        settings.relayEnabled = true
+        updateState { copy(relayPaired = false, relayEnabled = true) }
+    }
+
+    /**
+     * Switch Réglages — pause simple (ON→OFF coupe la connexion WS, garde le
+     * token) plutôt qu'un dépairing. OFF est libre (pas d'authentification,
+     * décision utilisateur) ; ON passe par [confirmRelayEnable] après
+     * authentification biométrique côté Fragment (le ViewModel n'a pas accès
+     * à une FragmentActivity).
+     */
+    fun setRelayEnabled(enabled: Boolean) {
+        if (enabled) return // voir confirmRelayEnable()
+        settings.relayEnabled = false
+        connectionManager.disconnect()
+        updateState { copy(relayEnabled = false) }
+    }
+
+    /** Appelée par SettingsFragment après authentification biométrique réussie pour réactiver le relay. */
+    fun confirmRelayEnable() {
+        settings.relayEnabled = true
+        updateState { copy(relayEnabled = true) }
+        if (sessionTokenStore.isPaired) {
+            connectionManager.connect()
+        }
+        // Sinon : aucun token à reprendre, l'utilisateur doit scanner un QR ou appairer
+        // manuellement — le bouton "Scanner un QR" reste l'action à faire ensuite.
+    }
+
+    /** Pairing en attente d'approbation de certificat TOFU — voir trustRelayCertAndRetry(). */
+    private var pendingPairing: PairingManager.PairingResult.CertificateCheckRequired? = null
+
+    private fun handlePairingResult(result: PairingManager.PairingResult) {
+        when (result) {
+            is PairingManager.PairingResult.Success -> {
+                pendingPairing = null
+                // Un (ré)appairage réussi (QR ou manuel) réactive explicitement le relay —
+                // l'utilisateur vient de faire le geste, un OFF antérieur ne doit pas le bloquer.
+                settings.relayEnabled = true
+                updateState { copy(relayPaired = true, relayEnabled = true, relayErrorMessage = null) }
+                connectionManager.connect()
+            }
+            is PairingManager.PairingResult.CertificateCheckRequired -> {
+                pendingPairing = result
+                updateState { copy(relayCertCheck = result.certCheck) }
+            }
+            is PairingManager.PairingResult.InvalidQrContent -> {
+                updateState { copy(relayErrorMessage = "QR de pairing invalide : ${result.reason}") }
+            }
+            is PairingManager.PairingResult.ServerRejected -> {
+                updateState { copy(relayErrorMessage = "Pairing refusé (${result.httpCode}) : ${result.error}") }
+            }
+            is PairingManager.PairingResult.NetworkError -> {
+                updateState { copy(relayErrorMessage = "Pairing impossible : ${result.message}") }
+            }
+        }
+    }
+
     companion object {
+        private const val TAG = "MainViewModel"
         private val SENTENCE_SEPARATORS = listOf(". ", "! ", "? ", ", ")
         private const val MAX_TOKENS_BEFORE_SPEAK = 5
     }
@@ -1055,6 +1543,8 @@ data class UiState(
     val connectionStatus:      ConnectionStatus = ConnectionStatus.DISCONNECTED,
     val errorMessage:          String?          = null,
     val errorType:             ErrorType?       = null,
+    /** Erreur pairing/relay/session hermes-webui — distinct de errorMessage (chat/STT) pour ne pas mélanger les deux dans SettingsScreen. */
+    val relayErrorMessage:     String?          = null,
     val ttsEnabled:            Boolean          = true,
     val wakeWordEnabled:       Boolean          = true,
     val resumedConversationId: Long?            = null,
@@ -1065,8 +1555,18 @@ data class UiState(
     val relayConnectionStatus: RelayConnectionStatus = RelayConnectionStatus.DISCONNECTED,
     val relayCertCheck:        com.hasan.v1.auth.CertPinStore.CertCheckResult? = null,
     val relayPaired:           Boolean          = false,
+    /** Intention utilisateur (switch Réglages) — distinct de relayPaired (présence d'un token). Voir SettingsManager.relayEnabled. */
+    val relayEnabled:          Boolean          = true,
     val pendingClarify:        PendingClarify?  = null,
-    val pendingBridgeConfirmation: PendingBridgeConfirmation? = null
+    val pendingBridgeConfirmation: PendingBridgeConfirmation? = null,
+    val pendingApprovals:      List<com.hasan.v1.webui.models.PendingApproval> = emptyList(),
+    val availableModels:       List<com.hasan.v1.webui.models.ModelOption> = emptyList(),
+    val selectedModel:         String?          = null,
+    /** Cookie de session hermes-webui présent — indépendant du relay bridge (relayPaired), voir WebUiAuthStore.isLoggedIn. */
+    val webUiLoggedIn:         Boolean          = false,
+    /** Pièces jointes déjà uploadées (POST /api/upload), en attente d'être jointes au prochain message envoyé. */
+    val pendingAttachments:    List<com.hasan.v1.webui.models.UploadedAttachment> = emptyList(),
+    val attachmentUploading:   Boolean          = false
 )
 
 /** Clarification demandée par Hermes en cours (voir StreamEvent.ClarifyPrompt). */
@@ -1086,6 +1586,29 @@ data class PendingBridgeConfirmation(
 enum class SttStatus { IDLE, STARTING, LISTENING, PROCESSING, SENDING, STREAMING }
 enum class TtsStatus  { IDLE, SPEAKING }
 enum class ConnectionStatus { CONNECTED, RECONNECTING, DISCONNECTED }
+
+/**
+ * Reproduit exactement static/messages.js (hermes-webui, vrai frontend web) :
+ * le champ `attachments[]` du payload POST /api/chat/start ne sert qu'à
+ * l'embed multimodal natif pour les images (voir
+ * _build_native_multimodal_message, api/streaming.py côté serveur) — pour un
+ * fichier non-image, le serveur se contente de le stocker sur la session
+ * sans jamais le signaler au modèle. Le texte du message doit donc porter
+ * lui-même les chemins pour que le modèle sache qu'un fichier existe et
+ * aille le lire via ses outils (search_files/read_file).
+ */
+internal fun buildMessageWithAttachments(
+    text: String,
+    attachments: List<com.hasan.v1.webui.models.UploadedAttachment>
+): String {
+    if (attachments.isEmpty()) return text
+    val paths = attachments.map { it.path }
+    return if (text.isBlank()) {
+        "J'ai uploadé ${attachments.size} fichier(s) : ${paths.joinToString(", ")}"
+    } else {
+        "$text\n\n[Fichiers joints : ${paths.joinToString(", ")}]"
+    }
+}
 
 /**
  * Détecte une erreur d'appel LLM (Hermes/DeepSeek) renvoyée comme contenu de réponse
@@ -1116,8 +1639,7 @@ sealed class VoiceState {
 
 /** Dérive le VoiceState depuis l'état UI courant. */
 fun UiState.voiceState(): VoiceState = when {
-    errorMessage != null && !errorMessage.startsWith("CERT:") ->
-        VoiceState.Error(errorMessage)
+    errorMessage != null -> VoiceState.Error(errorMessage)
     ttsStatus == TtsStatus.SPEAKING     -> VoiceState.TtsSpeaking
     sttStatus == SttStatus.STREAMING    -> VoiceState.HermesStreaming(thinkingMessage)
     sttStatus == SttStatus.SENDING      -> VoiceState.HermesThinking

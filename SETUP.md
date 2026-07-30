@@ -34,7 +34,31 @@ Open the app → **Settings** tab → **Hermes Connection** section → enter th
 
 Dev defaults: `https://192.168.1.100:8443` / `HASAN_DEV_TOKEN`
 
-## 4 — Build and install
+## 4 — Firebase (proactive notifications, optional)
+
+Needed only if you want proactive notifications (e.g. cron job reminders) to
+reach your phone while the app is fully closed. Skip this section if you're
+fine only receiving them while the app is open — the build works without it.
+
+Firebase Cloud Messaging (FCM) is used strictly as a **data-only wake-up
+signal** — Google never sees the notification text, only "wake up this
+device now". The real content is fetched afterwards straight from your own
+relay server (`GET /phone/pending`, your own TLS connection). See
+`docs/ARCHITECTURE.md` for the full flow.
+
+1. Go to the [Firebase console](https://console.firebase.google.com) and
+   create a project (Analytics can be left disabled, it's not needed).
+2. Add an Android app to the project — package name **must** be `com.hasan.v1`.
+3. Download the generated `google-services.json` and place it at
+   `app/google-services.json` (gitignored — one per Firebase project, not
+   shared across forks/installs).
+4. That's it for the app side. The server-side counterpart (a Firebase
+   service account key, needed on the relay to actually send wake-ups) is
+   covered in [`DEPLOYMENT.md`](DEPLOYMENT.md) — the app builds and runs
+   fine without it, it just won't receive wake-ups while closed until the
+   server side is also configured.
+
+## 5 — Build and install
 
 ```bash
 ./gradlew assembleDebug

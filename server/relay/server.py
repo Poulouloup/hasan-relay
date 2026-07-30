@@ -14,22 +14,42 @@ Variables d'environnement :
     HERMES_API_TOKEN    (optionnel) — Bearer token vers Hermes, si requis
     RELAY_SESSIONS_PATH (optionnel) — chemin du fichier de persistance des
                          sessions (défaut: ~/.hermes/hasan-relay-sessions.json)
+    WEBUI_URL           (optionnel) — URL publique hermes-webui, incluse dans
+                         la réponse de POST /pairing/create pour que l'app
+                         s'auto-configure au scan du QR (voir docs/webui-migration.md).
+                         Valeur à copier depuis ~/hermes-webui/.env — pas de
+                         lecture croisée de fichier entre les deux services.
+    WEBUI_PASSWORD      (optionnel) — doit être défini SI ET SEULEMENT SI
+                         WEBUI_URL l'est aussi (les deux ou aucun, voir
+                         handle_pairing_create) — même valeur que
+                         HERMES_WEBUI_PASSWORD dans ~/hermes-webui/.env.
+    RELAY_FCM_CREDENTIALS_PATH (optionnel) — chemin vers le fichier JSON de
+                         service account Firebase (obtenu depuis la console
+                         Firebase du projet, Paramètres du projet > Comptes de
+                         service > Générer une nouvelle clé privée). Si absent,
+                         les notifications proactives restent fonctionnelles
+                         via le WebSocket + push buffer, simplement sans réveil
+                         FCM quand l'app est hors ligne — dégradation
+                         gracieuse, pas un prérequis dur.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from aiohttp import web
 
 from bridge_commands import BridgeCommandRegistry, CommandTimeoutError
 from chat_stream import ChatSessionRegistry
+from device_watch import DeviceChangeSignal
 from envelope import Envelope, EnvelopeError
 from pairing import DEFAULT_SESSIONS_PATH, PairingManager
 from push_buffer import PushBuffer
@@ -66,6 +86,21 @@ KEY_ADMIN_TOKEN = web.AppKey("admin_token", str)
 KEY_HERMES_API_BASE_URL = web.AppKey("hermes_api_base_url", str)
 KEY_HERMES_API_TOKEN = web.AppKey("hermes_api_token", str)
 KEY_PUBLIC_URL = web.AppKey("public_url", str)
+# hermes-webui (chat) — serveur distinct du relay, config exposée uniquement
+# via /pairing/create pour que l'app puisse s'auto-configurer au scan du QR.
+# Absents par défaut : un déploiement relay sans hermes-webui reste
+# fonctionnel pour le bridge, juste sans ces deux champs dans la réponse.
+KEY_WEBUI_URL = web.AppKey("webui_url", str)
+KEY_WEBUI_PASSWORD = web.AppKey("webui_password", str)
+# Signal "un device a changé" (connexion/déconnexion/capabilities) — pour
+# GET /devices/watch, consommé par plugin/hasan_delivery pour savoir quand
+# relire GET /devices sans avoir à faire du polling serré. Voir device_watch.py.
+KEY_DEVICE_WATCH = web.AppKey("device_watch", DeviceChangeSignal)
+# Instance firebase_admin.App initialisée si RELAY_FCM_CREDENTIALS_PATH est
+# configuré, None sinon (déploiement sans FCM reste pleinement fonctionnel —
+# voir _init_fcm_app/_send_fcm_wake). Type Any : firebase-admin est une
+# dépendance optionnelle, pas importée au niveau module.
+KEY_FCM_APP: web.AppKey[Any] = web.AppKey("fcm_app", object)
 
 
 def _client_ip(request: web.Request) -> str:
@@ -92,6 +127,46 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "timestamp": time.time()})
 
 
+_VERSION_FILE = Path(__file__).parent / "VERSION"
+
+
+def _read_relay_version() -> str:
+    try:
+        return _VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+
+
+def _read_relay_commit() -> str | None:
+    """SHA du commit courant si le déploiement est un checkout git, sinon None.
+
+    Best-effort : un déploiement peut aussi être une simple copie de fichiers
+    sans .git (ou git absent du PATH) — ne jamais faire échouer /version pour ça.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+async def handle_version(request: web.Request) -> web.Response:
+    return web.json_response({
+        "version": _read_relay_version(),
+        "commit": _read_relay_commit(),
+    })
+
+
 async def handle_pairing_create(request: web.Request) -> web.Response:
     """Génère un nouveau code de pairing. Protégé par RELAY_ADMIN_TOKEN.
 
@@ -113,6 +188,15 @@ async def handle_pairing_create(request: web.Request) -> web.Response:
     public_url = request.app[KEY_PUBLIC_URL]
     if public_url:
         response["relay_url"] = public_url
+
+    # hermes-webui optionnel — seulement si les deux champs sont configurés
+    # (WEBUI_URL/WEBUI_PASSWORD sur hermes-relay.service), jamais l'un sans
+    # l'autre pour ne pas produire un QR incomplet côté app.
+    webui_url = request.app[KEY_WEBUI_URL]
+    webui_password = request.app[KEY_WEBUI_PASSWORD]
+    if webui_url and webui_password:
+        response["webui_url"] = webui_url
+        response["webui_password"] = webui_password
 
     return web.json_response(response)
 
@@ -175,6 +259,51 @@ async def handle_pairing_refresh(request: web.Request) -> web.Response:
     })
 
 
+async def _send_fcm_wake(app: web.Application, device_hash: str) -> None:
+    """Réveil FCM data-only best-effort — ne doit JAMAIS faire échouer
+    /phone/message : le message reste bufferisé (push_buffer) quoi qu'il
+    arrive, FCM n'est qu'un accélérateur de livraison quand l'app n'a pas de
+    WS actif. Silencieux si firebase-admin n'est pas configuré (déploiement
+    sans FCM) ou si ce device n'a jamais transmis de token (app non mise à
+    jour, ou FCM indisponible côté device).
+
+    Payload strictement data-only ({"type": "wake"}) — jamais de bloc
+    `notification`, jamais le texte du message ni le device_hash : Google ne
+    doit voir qu'un signal de réveil opaque, jamais le contenu (voir
+    HasanFirebaseMessagingService côté app, qui va chercher le vrai texte via
+    GET /phone/pending, un canal privé TLS vers ce relay).
+    """
+    fcm_app = app.get(KEY_FCM_APP)
+    if fcm_app is None:
+        return  # FCM non configuré côté serveur — comportement pré-FCM inchangé
+    session = app[KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    if session is None or not session.fcm_token:
+        return
+
+    from firebase_admin import messaging  # import tardif, module optionnel
+
+    message = messaging.Message(
+        data={"type": "wake"},
+        token=session.fcm_token,
+        android=messaging.AndroidConfig(priority="high"),
+    )
+    try:
+        # app doit être passé en keyword — messaging.send(message, dry_run,
+        # app) : un 3e positionnel atterrit sur dry_run, pas app, et déclenche
+        # un envoi factice (fake_message_id) sans jamais toucher le device.
+        await asyncio.get_event_loop().run_in_executor(
+            None, functools.partial(messaging.send, message, app=fcm_app)
+        )
+        log.info("Réveil FCM envoyé device_hash=%s...", device_hash[:8])
+    except Exception as exc:
+        # Token possiblement périmé (désinstall, reset FCM) — log seulement,
+        # ne pas invalider automatiquement (une invalidation erronée coûte
+        # cher : prochain réveil silencieusement perdu jusqu'à la prochaine
+        # connexion WS). Nettoyage best-effort laissé à une itération future
+        # si le volume d'erreurs le justifie.
+        log.warning("Échec envoi FCM device_hash=%s...: %s", device_hash[:8], exc)
+
+
 async def handle_phone_message(request: web.Request) -> web.Response:
     """Entrée pour le plugin Hermes : pousse un message vers l'app (via push buffer + WS live)."""
     device_hash = _require_session(request)
@@ -198,6 +327,7 @@ async def handle_phone_message(request: web.Request) -> web.Response:
         await ws.send_json(envelope)
     else:
         request.app[KEY_PUSH_BUFFER].push(device_hash, envelope)
+        await _send_fcm_wake(request.app, device_hash)
 
     return web.json_response({"delivered": ws is not None and not ws.closed})
 
@@ -236,15 +366,35 @@ async def handle_phone_outbound(request: web.Request) -> web.Response:
     return web.json_response({"pending": request.app[KEY_PUSH_BUFFER].pending_count(device_hash)})
 
 
-async def handle_bridge_command(request: web.Request) -> web.Response:
-    """Entrée pour le plugin Hermes (tool function-calling) : exécute une
-    capability sur le téléphone via le canal `bridge` du WS, attend le
-    résultat borné dans le temps (voir bridge_commands.py).
+async def handle_phone_pending(request: web.Request) -> web.Response:
+    """Draine (vide) le push buffer de ce device sans passer par le WS —
+    utilisé par HasanFirebaseMessagingService.onMessageReceived() après un
+    réveil FCM data-only : l'app n'a aucune raison de rouvrir tout le
+    WebSocket juste pour récupérer 1-2 messages en tâche de fond (coûteux en
+    latence/énergie). Contrat volontairement identique à ce que drain()
+    fournit déjà au WS connect (voir handle_ws) : les enveloppes sont
+    retirées du buffer ici, pas juste consultées — /phone/pending n'est PAS
+    idempotent, un second appel immédiat renvoie liste vide. Si l'app rouvre
+    le WS juste après un drainage HTTP, aucune redélivraison (le buffer est
+    déjà vide).
 
-    Contrat requête : {"capability": str, "params": dict} — même vocabulaire
-    que côté Android (CapabilityExecutor.execute(capability, params)).
-    Retourne le résultat de la capability tel que renvoyé par le téléphone,
-    ou une erreur si le device n'est pas connecté / ne répond pas à temps.
+    Distinct de GET /phone/outbound (qui reste un peek — juste un compteur,
+    lecture seule, contrat inchangé pour ne pas casser un appelant existant).
+    """
+    device_hash = _require_session(request)
+    if device_hash is None:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    envelopes = request.app[KEY_PUSH_BUFFER].drain(device_hash)
+    return web.json_response({"messages": envelopes})
+
+
+async def handle_fcm_token(request: web.Request) -> web.Response:
+    """Reçoit le token FCM courant du device — appelé par
+    HasanFirebaseMessagingService.onNewToken() côté app, indépendamment du
+    cycle de vie du WS (un token peut être régénéré par Firebase alors que
+    l'app est tuée/hors connexion, donc le canal WS system/capabilities,
+    envoyé seulement à onOpen(), ne suffirait pas pour une resynchronisation
+    immédiate). Voie canonique unique de synchronisation du token FCM.
     """
     device_hash = _require_session(request)
     if device_hash is None:
@@ -255,6 +405,117 @@ async def handle_bridge_command(request: web.Request) -> web.Response:
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid_json"}, status=400)
 
+    fcm_token = body.get("fcm_token")
+    if fcm_token is not None and not isinstance(fcm_token, str):
+        return web.json_response({"error": "invalid_fcm_token"}, status=400)
+    # fcm_token == None accepté explicitement (désenregistrement, ex: appel
+    # depuis un futur "désactiver notifications proactives" dans Réglages).
+
+    request.app[KEY_PAIRING_MANAGER].update_fcm_token(device_hash, fcm_token)
+    return web.json_response({"ok": True})
+
+
+async def handle_capabilities(request: web.Request) -> web.Response:
+    """Capabilities annoncées par le device (envelope system/capabilities), pour
+    plugin/hasan_delivery/tools.py — évite de dupliquer les schémas des capabilities
+    téléphone côté Python : l'app reste la seule source de vérité (Capability.kt).
+
+    Liste vide (pas d'erreur) si le device ne s'est encore jamais connecté depuis
+    l'ajout de ce mécanisme, ou n'a annoncé aucune capability activée+autorisée.
+    """
+    device_hash = _require_session(request)
+    if device_hash is None:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    session = request.app[KEY_PAIRING_MANAGER].get_session_by_device_hash(device_hash)
+    capabilities = session.capabilities if session and session.capabilities else []
+    return web.json_response({"capabilities": capabilities})
+
+
+async def handle_devices_list(request: web.Request) -> web.Response:
+    """GET /devices — admin-authed, liste tous les devices connus (persistés),
+    avec leur état de connexion live et leurs capabilities. Consommé par
+    plugin/hasan_delivery/tools.py pour construire l'union des tools
+    function-calling à travers tous les devices appairés (voir
+    handle_pairing_create pour le modèle d'auth repris ici : admin_token, pas
+    session_token — cet endpoint est intrinsèquement cross-device, aucun
+    session_token de device particulier ne pourrait le scoper correctement).
+    """
+    admin_token = request.app[KEY_ADMIN_TOKEN]
+    if not admin_token:
+        return web.json_response({"error": "admin_token_not_configured"}, status=503)
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    active_connections = request.app[KEY_ACTIVE_CONNECTIONS]
+    devices = []
+    for session in request.app[KEY_PAIRING_MANAGER].list_devices():
+        ws = active_connections.get(session.device_hash)
+        devices.append({
+            "device_id": session.device_hash,
+            "label": session.device_label,
+            "connected": ws is not None and not ws.closed,
+            "capabilities": session.capabilities or [],
+        })
+    return web.json_response({"devices": devices})
+
+
+async def handle_devices_watch(request: web.Request) -> web.Response:
+    """GET /devices/watch?timeout=30 — long-poll admin-authed : bloque jusqu'à
+    ce que l'ensemble des devices OU les capabilities/label d'un device
+    changent, ou jusqu'à `timeout` secondes. Retourne juste un signal, pas
+    l'état lui-même — l'appelant relit GET /devices après réveil (voir
+    device_watch.py pour le pourquoi d'un signal unique non granulaire).
+    """
+    admin_token = request.app[KEY_ADMIN_TOKEN]
+    if not admin_token:
+        return web.json_response({"error": "admin_token_not_configured"}, status=503)
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        timeout = float(request.query.get("timeout", "30"))
+    except ValueError:
+        timeout = 30.0
+    timeout = max(0.0, min(timeout, 60.0))
+
+    changed = await request.app[KEY_DEVICE_WATCH].wait(timeout)
+    return web.json_response({"changed": changed})
+
+
+async def handle_bridge_command(request: web.Request) -> web.Response:
+    """Entrée pour le plugin Hermes (tool function-calling) : exécute une
+    capability sur UN device explicite via le canal `bridge` du WS, attend le
+    résultat borné dans le temps (voir bridge_commands.py).
+
+    Authentification par admin_token (pas session_token) — le token de
+    session est intrinsèquement scopé à un device, alors que ce endpoint
+    cible n'importe quel device connu depuis que le plugin gère plusieurs
+    devices simultanément ; le plugin agit comme un opérateur de confiance
+    cross-device, pas comme un device particulier (même modèle que
+    GET /devices).
+
+    Contrat requête : {"device_id": str, "capability": str, "params": dict}
+    — device_id correspond au device_hash retourné par GET /devices.
+    Retourne le résultat de la capability tel que renvoyé par le téléphone,
+    ou une erreur si le device n'est pas connecté / ne répond pas à temps.
+    """
+    admin_token = request.app[KEY_ADMIN_TOKEN]
+    if not admin_token:
+        return web.json_response({"error": "admin_token_not_configured"}, status=503)
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {admin_token}":
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "invalid_json"}, status=400)
+
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        return web.json_response({"error": "missing_device_id"}, status=400)
     capability = body.get("capability")
     if not isinstance(capability, str) or not capability:
         return web.json_response({"error": "missing_capability"}, status=400)
@@ -264,7 +525,7 @@ async def handle_bridge_command(request: web.Request) -> web.Response:
     if not isinstance(params, dict):
         return web.json_response({"error": "params_must_be_object"}, status=400)
 
-    ws = request.app[KEY_ACTIVE_CONNECTIONS].get(device_hash)
+    ws = request.app[KEY_ACTIVE_CONNECTIONS].get(device_id)
     if ws is None or ws.closed:
         return web.json_response({"error": "device_not_connected"}, status=503)
 
@@ -359,6 +620,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
 
     device_hash = session.device_hash
     active_connections = request.app[KEY_ACTIVE_CONNECTIONS]
+    device_watch = request.app[KEY_DEVICE_WATCH]
 
     previous = active_connections.get(device_hash)
     if previous is not None and not previous.closed:
@@ -374,6 +636,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
         await previous.close(code=4000, message=b"superseded_by_new_connection")
     else:
         active_connections[device_hash] = ws
+    device_watch.bump()
     log.info("WS connecté device_hash=%s...", device_hash[:8])
 
     for pending_envelope in request.app[KEY_PUSH_BUFFER].drain(device_hash):
@@ -393,6 +656,8 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
                     active_connections=active_connections,
                     hermes_api_base_url=request.app[KEY_HERMES_API_BASE_URL],
                     hermes_api_token=request.app[KEY_HERMES_API_TOKEN],
+                    pairing_manager=request.app[KEY_PAIRING_MANAGER],
+                    device_watch=device_watch,
                 )
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 log.warning("WS erreur device_hash=%s...: %s", device_hash[:8], ws.exception())
@@ -405,6 +670,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
             # en cours doivent survivre, la nouvelle connexion les récupère
             # via la re-résolution de `ws` dans send_envelope (chat_stream.py).
             chat_sessions.cancel_all_for_device(device_hash)
+            device_watch.bump()
         log.info("WS déconnecté device_hash=%s...", device_hash[:8])
 
     return ws
@@ -436,6 +702,41 @@ async def _handle_chat_health(
     )
 
 
+
+async def _handle_chat_clarify_response(
+    ws: web.WebSocketResponse, envelope: Envelope, hermes_api_base_url: str, hermes_token: str
+) -> None:
+    """chat/clarify_response — relaye la réponse de l'utilisateur vers Hermes."""
+    session_id = envelope.payload.get("session_id") or envelope.payload.get("id")
+    clarify_id = envelope.payload.get("clarify_id")
+    response_text = envelope.payload.get("response")
+    if not session_id or not clarify_id or response_text is None:
+        await ws.send_json(Envelope(channel="chat", type="error", id=envelope.id, payload={
+            "reason": "invalid_payload",
+            "message": "clarify_id, session_id et response sont requis"
+        }).to_dict())
+        return
+
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{hermes_api_base_url}/api/sessions/{session_id}/clarify-response",
+                json={"clarify_id": clarify_id, "response": response_text},
+                headers={"Authorization": f"Bearer {hermes_token}"} if hermes_token else {},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    return  # Pas d'ack — les tokens qui suivent confirment
+                error_body = (await resp.text())[:200]
+                await ws.send_json(Envelope(channel="chat", type="error", id=envelope.id, payload={
+                    "reason": "clarify_expired",
+                    "message": f"Clarification expirée (HTTP {resp.status}): {error_body}"
+                }).to_dict())
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        await ws.send_json(Envelope(channel="chat", type="error", id=envelope.id, payload={
+            "reason": "clarify_error",
+            "message": f"Erreur lors de l'envoi de la clarification: {exc}"
+        }).to_dict())
 async def _dispatch_inbound(
     ws: web.WebSocketResponse,
     raw: str,
@@ -446,6 +747,8 @@ async def _dispatch_inbound(
     active_connections: dict[str, web.WebSocketResponse],
     hermes_api_base_url: str,
     hermes_api_token: str,
+    pairing_manager: PairingManager,
+    device_watch: DeviceChangeSignal,
 ) -> None:
     try:
         data = json.loads(raw)
@@ -457,6 +760,19 @@ async def _dispatch_inbound(
     if envelope.channel == "system" and envelope.type == "ping":
         pong = Envelope(channel="system", type="pong", payload={}).to_dict()
         await ws.send_json(pong)
+        return
+
+    if envelope.channel == "system" and envelope.type == "capabilities":
+        caps = envelope.payload.get("capabilities")
+        if isinstance(caps, list):
+            device_label = envelope.payload.get("device_label")
+            if device_label is not None and not isinstance(device_label, str):
+                device_label = None
+            changed = pairing_manager.update_capabilities(device_hash, caps, device_label)
+            if changed:
+                device_watch.bump()
+        else:
+            log.warning("Enveloppe system/capabilities malformée (capabilities non-liste) id=%s", envelope.id)
         return
 
     if envelope.channel == "bridge" and envelope.type == "command_result":
@@ -507,6 +823,9 @@ async def _dispatch_inbound(
             chat_sessions.cancel(session_id)
         return
 
+    if envelope.channel == "chat" and envelope.type == "clarify_response":
+        await _handle_chat_clarify_response(ws, envelope, hermes_api_base_url, hermes_api_token)
+        return
     if envelope.channel == "chat" and envelope.type == "health":
         await _handle_chat_health(ws, envelope, hermes_api_base_url)
         return
@@ -518,15 +837,37 @@ async def _dispatch_inbound(
 # ─────────────────────────── App factory ───────────────────────────
 
 
+def _init_fcm_app(credentials_path: str) -> Any:
+    """None si non configuré (déploiement sans FCM reste pleinement
+    fonctionnel — comportement pré-FCM) ou si le fichier est absent/invalide.
+    Ne fait jamais planter le démarrage du relay pour une mauvaise config FCM
+    — un opérateur qui se trompe de chemin doit voir son relay démarrer quand
+    même (juste sans réveils FCM), pas un crash au boot."""
+    if not credentials_path:
+        return None
+    try:
+        import firebase_admin
+        from firebase_admin import credentials
+
+        cred = credentials.Certificate(credentials_path)
+        return firebase_admin.initialize_app(cred)
+    except Exception as exc:
+        log.error("Échec init firebase-admin (%s) — réveils FCM désactivés: %s", credentials_path, exc)
+        return None
+
+
 def create_app(
     *,
     admin_token: str = "",
     hermes_api_base_url: str = "http://127.0.0.1:8443",
     hermes_api_token: str = "",
     public_url: str = "",
+    webui_url: str = "",
+    webui_password: str = "",
     pairing_rate_limit_attempts: int = PAIRING_RATE_LIMIT_ATTEMPTS,
     pairing_rate_limit_window_seconds: float = PAIRING_RATE_LIMIT_WINDOW_SECONDS,
     sessions_path: Path | None = None,
+    fcm_credentials_path: str = "",
 ) -> web.Application:
     """[sessions_path] : None = pas de persistance disque (défaut — utilisé par
     les tests, qui ne doivent jamais toucher le disque ni interférer entre eux
@@ -544,15 +885,25 @@ def create_app(
     app[KEY_HERMES_API_BASE_URL] = hermes_api_base_url
     app[KEY_HERMES_API_TOKEN] = hermes_api_token
     app[KEY_PUBLIC_URL] = public_url.rstrip("/")
+    app[KEY_WEBUI_URL] = webui_url.rstrip("/")
+    app[KEY_WEBUI_PASSWORD] = webui_password
+    app[KEY_DEVICE_WATCH] = DeviceChangeSignal()
+    app[KEY_FCM_APP] = _init_fcm_app(fcm_credentials_path)
 
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/version", handle_version)
     app.router.add_post("/pairing/create", handle_pairing_create)
     app.router.add_post("/pairing/register", handle_pairing_register)
     app.router.add_post("/pairing/refresh", handle_pairing_refresh)
     app.router.add_post("/phone/message", handle_phone_message)
     app.router.add_get("/phone/replies", handle_phone_replies)
     app.router.add_get("/phone/outbound", handle_phone_outbound)
+    app.router.add_get("/phone/pending", handle_phone_pending)
+    app.router.add_post("/fcm-token", handle_fcm_token)
     app.router.add_post("/bridge/command", handle_bridge_command)
+    app.router.add_get("/capabilities", handle_capabilities)
+    app.router.add_get("/devices", handle_devices_list)
+    app.router.add_get("/devices/watch", handle_devices_watch)
     app.router.add_get("/ws", handle_ws)
     return app
 
@@ -565,7 +916,10 @@ def create_app_from_env() -> web.Application:
         hermes_api_base_url=os.environ.get("HERMES_API_BASE_URL", "http://127.0.0.1:8443"),
         hermes_api_token=os.environ.get("HERMES_API_TOKEN", ""),
         public_url=os.environ.get("RELAY_PUBLIC_URL", ""),
+        webui_url=os.environ.get("WEBUI_URL", ""),
+        webui_password=os.environ.get("WEBUI_PASSWORD", ""),
         sessions_path=sessions_path,
+        fcm_credentials_path=os.environ.get("RELAY_FCM_CREDENTIALS_PATH", ""),
     )
 
 

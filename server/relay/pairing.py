@@ -68,6 +68,26 @@ class Session:
     # (ex: session migrée depuis un ancien format sans refresh).
     refresh_token_hash: str | None = None
     refresh_expires_at: float | None = None  # time.time()
+    # Capabilities annoncées par l'app à la connexion WS (envelope
+    # system/capabilities, voir ConnectionManager.kt côté app) — None pour
+    # une session migrée depuis un ancien format sans ce champ, ou avant la
+    # première annonce. Exposé en lecture via GET /devices pour
+    # plugin/hasan_delivery/tools.py (voir server.py handle_devices_list).
+    capabilities: list[dict] | None = None
+    # Libellé lisible du device (ex: "Pixel 8 Pro"), annoncé dans le même
+    # envelope system/capabilities (Build.MANUFACTURER + Build.MODEL côté
+    # Android, voir CapabilitySchema.kt::deviceLabel) — None pour une session
+    # migrée depuis un ancien format, ou avant la première annonce. Purement
+    # cosmétique (affichage dans GET /devices, messages d'erreur du plugin
+    # en cas d'ambiguïté multi-device) — jamais utilisé pour l'auth ou le
+    # routage, qui restent basés sur device_hash.
+    device_label: str | None = None
+    # Token FCM courant de ce device (opaque, réémis par Firebase à chaque
+    # rotation) — permet de réveiller l'app via un push data-only quand elle
+    # n'a pas de WS actif (Doze mode, app tuée). None si le device n'a jamais
+    # transmis de token (app pas encore mise à jour, ou FCM indisponible côté
+    # device — ex: build sans Google Play Services). Voir POST /fcm-token.
+    fcm_token: str | None = None
 
     def expired(self) -> bool:
         return time.time() - self.last_seen_at > SESSION_TOKEN_TTL_SECONDS
@@ -85,6 +105,9 @@ class Session:
             "last_seen_at": self.last_seen_at,
             "refresh_token_hash": self.refresh_token_hash,
             "refresh_expires_at": self.refresh_expires_at,
+            "capabilities": self.capabilities,
+            "device_label": self.device_label,
+            "fcm_token": self.fcm_token,
         }
 
     @staticmethod
@@ -97,6 +120,9 @@ class Session:
                 last_seen_at=float(data["last_seen_at"]),
                 refresh_token_hash=data.get("refresh_token_hash"),
                 refresh_expires_at=data.get("refresh_expires_at"),
+                capabilities=data.get("capabilities"),
+                device_label=data.get("device_label"),
+                fcm_token=data.get("fcm_token"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -171,6 +197,71 @@ class PairingManager:
         # (redeem/refresh/revoke) est un TTL légèrement sous-estimé au
         # rechargement, jamais une perte de session.
         return session
+
+    def get_session_by_device_hash(self, device_hash: str) -> Session | None:
+        """Retrouve la session la plus récente d'un device — indexation interne par
+        session_token, pas par device_hash, d'où l'itération. Un même device peut
+        avoir plusieurs sessions accumulées dans le temps (chaque pairing/reconnexion
+        n'en réutilise pas forcément une existante) : prendre max(last_seen_at) évite
+        de retomber sur une session ancienne et morte plutôt que la session active."""
+        matches = [s for s in self._sessions.values() if s.device_hash == device_hash]
+        if not matches:
+            return None
+        return max(matches, key=lambda s: s.last_seen_at)
+
+    def update_capabilities(
+        self, device_hash: str, capabilities: list[dict], device_label: str | None = None
+    ) -> bool:
+        """Persiste les capabilities (+ libellé) annoncés par l'app (envelope
+        system/capabilities). Retourne True si un changement réel a eu lieu
+        (contenu OU libellé) — utilisé par server.py pour ne signaler le
+        watcher multi-device (voir device_watch.py) que sur un vrai changement.
+
+        Comme touch(), évite une écriture disque à chaque appel — mais ici la
+        comparaison de contenu (pas juste un TTL glissant) permet de ne
+        persister que sur un changement réel, ce qui reste rare (une
+        reconnexion WS n'implique pas forcément un changement de capabilities).
+        """
+        session = self.get_session_by_device_hash(device_hash)
+        if session is None:
+            return False
+        if session.capabilities == capabilities and session.device_label == device_label:
+            return False
+        session.capabilities = capabilities
+        session.device_label = device_label
+        self._save_to_disk()
+        return True
+
+    def update_fcm_token(self, device_hash: str, fcm_token: str | None) -> bool:
+        """Persiste le token FCM courant de ce device (voir POST /fcm-token).
+        Retourne True si un changement réel a eu lieu — même pattern que
+        update_capabilities, évite une écriture disque à chaque appel
+        redondant (l'app resynchronise best-effort à chaque connexion WS,
+        voir HasanFirebaseMessagingService côté app). Pas de bump du
+        device_watch ici : le token FCM n'intéresse aucun watcher existant
+        (GET /devices/watch sert le function-calling cross-device, pas
+        la livraison de notifications proactives)."""
+        session = self.get_session_by_device_hash(device_hash)
+        if session is None:
+            return False
+        if session.fcm_token == fcm_token:
+            return False
+        session.fcm_token = fcm_token
+        self._save_to_disk()
+        return True
+
+    def list_devices(self) -> list[Session]:
+        """Une session par device_hash connu (la plus récente — même règle que
+        get_session_by_device_hash), pour GET /devices. Inclut les devices non
+        connectés actuellement — cette méthode ne connaît pas les WebSockets,
+        la connectivité live est résolue séparément par l'appelant via
+        KEY_ACTIVE_CONNECTIONS (server.py)."""
+        latest: dict[str, Session] = {}
+        for session in self._sessions.values():
+            current = latest.get(session.device_hash)
+            if current is None or session.last_seen_at > current.last_seen_at:
+                latest[session.device_hash] = session
+        return list(latest.values())
 
     def refresh(self, refresh_token: str) -> RefreshResult | None:
         """Échange un refresh_token contre un nouveau (session_token, refresh_token).

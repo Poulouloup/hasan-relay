@@ -1,0 +1,384 @@
+# Changelog
+
+Format inspiré de [Keep a Changelog](https://keepachangelog.com/). Une entrée
+par fix ou upgrade notable — le "pourquoi", pas juste le "quoi" (le diff git
+montre déjà le quoi).
+
+## [Unreleased]
+
+### Added
+- Réveil FCM (Firebase Cloud Messaging) data-only pour les notifications
+  proactives — le canal `proactive` existant (WebSocket persistant) ne
+  survit pas de façon fiable quand l'app est fermée/en veille (pas de
+  foreground service dédié, l'utilisateur a explicitement refusé d'en
+  ajouter un second — le service wake word consomme déjà trop de batterie
+  avec son WakeLock + inférence ONNX continue). FCM est la seule solution
+  Android pour un réveil externe sans rien faire tourner en continu.
+  Payload strictement `{"type": "wake"}` — Google ne voit jamais le texte
+  du message, seulement un signal opaque ; le contenu réel est récupéré
+  ensuite via `GET /phone/pending` (nouveau, HTTP privé TLS vers le relay
+  de l'utilisateur). Nouveau champ `Session.fcm_token`
+  (`server/relay/pairing.py`), nouvel endpoint `POST /fcm-token`, nouveau
+  `HasanFirebaseMessagingService` côté app (réutilise l'affichage de
+  notification déjà écrit mais jamais branché pour ce canal — extrait dans
+  `ProactiveNotifier` pour être partagé avec le chemin WS existant).
+  Entièrement optionnel et dégradé gracieusement : sans
+  `RELAY_FCM_CREDENTIALS_PATH` configuré côté serveur, comportement
+  identique à avant (WebSocket + push buffer uniquement). Voir
+  `docs/ARCHITECTURE.md` pour le flux complet et `SETUP.md`/`DEPLOYMENT.md`
+  pour la configuration Firebase.
+- `server/install-bridge.sh` — orchestrateur "une commande" pour le
+  déploiement serveur du bridge Hasan (relay + Caddy en Docker Compose,
+  `network_mode: host`, + plugin `hasan_delivery` côté Hermes existant).
+  Wizard interactif unique (IP publique, détection hermes-webui,
+  exposition optionnelle du dashboard Hermes), génère `RELAY_ADMIN_TOKEN`
+  automatiquement (`hermes-relay.service` n'avait jusqu'ici aucun
+  placeholder pour cette variable — édition manuelle requise à chaque
+  déploiement). Motivé par les heures perdues le 2026-07-28 sur un VPS de
+  dev où deux Caddyfiles divergents (un process manuel `nohup`, un
+  service systemd) routaient vers des ports différents, causant des 401
+  trompeurs et un ban fail2ban accidentel (voir
+  `archive/2026-07-28-retrait-skillclaw-webui-down.md`, non commité).
+  `install-relay.sh`/`install-plugin.sh` existants restent utilisables en
+  standalone (chemin manuel documenté dans `DEPLOYMENT.md`, non déprécié).
+  Nouveaux fichiers versionnés : `server/relay/Dockerfile`,
+  `server/docker-compose.yml`, `server/Caddyfile.template` (+
+  `Caddyfile.dashboard-block.template` optionnel).
+- Skill de diagnostic pour l'agent Hermes,
+  `plugin/hasan_delivery/skills/hasan-bridge-diagnosis/SKILL.md` (format
+  natif Hermes avec frontmatter YAML, distinct des skills
+  `.claude/skills/` de ce repo qui sont pour Claude Code uniquement) —
+  documente la topologie à 4 ports (relay/webui/dashboard/Caddy) et le
+  piège du double-Caddyfile découvert le 2026-07-28, pour qu'un futur
+  diagnostic ne perde pas les mêmes heures. Diagnostic uniquement, ne
+  redémarre/n'édite rien lui-même. Copié automatiquement par
+  `install-plugin.sh` (modification additive : glob de copie étendu pour
+  inclure `skills/hasan-bridge-diagnosis/`).
+- Écran Fichiers dans l'app (`FilesFragment`/`FilesViewModel`/`WebUiWorkspaceClient`)
+  — parcourir et télécharger le workspace hermes-webui, ouvert via un bouton
+  flottant dans le Chat (pas un onglet du drawer, usage occasionnel comme
+  Logs). Consomme `GET /api/list` et `GET /api/file/raw`, déjà existants côté
+  hermes-webui, jusqu'ici utilisés seulement par le frontend web statique —
+  aucun changement serveur nécessaire pour cette partie. Nommé "Fichiers" et
+  non "Fichiers de session" : dans la config par défaut de hermes-webui,
+  toutes les sessions partagent le même workspace disque, ce n'est pas un
+  espace isolé par conversation (voir docs/ARCHITECTURE.md#fichiers).
+- Onglet Kanban dans l'app (`KanbanFragment`/`KanbanViewModel`/`WebUiKanbanClient`)
+  — consulter les boards, déplacer des cartes entre colonnes, créer des
+  boards. Consomme l'API Kanban déjà existante côté hermes-webui
+  (`api/kanban_bridge.py`), jusqu'ici utilisée seulement par le frontend web
+  statique — aucun changement serveur nécessaire. Tags et colonnes
+  personnalisées non supportés : limitation côté serveur, pas un oubli
+  (voir docs/ARCHITECTURE.md#kanban).
+- `GET /version` sur le relay server (expose version + commit git déployés).
+- Packaging du plugin `hasan_delivery` (`requirements.txt`, `README.md`,
+  `install-plugin.sh`) — jusqu'ici installé uniquement à la main.
+- `DEPLOYMENT.md` — guide d'installation bout-en-bout (relay + plugin +
+  pairing) pour un utilisateur qui n'a pas construit le projet depuis les
+  sources.
+- CI minimal : tests relay (`relay-tests.yml`) et lint plugin (`plugin-lint.yml`).
+- 5 nouvelles capabilities bridge (`Capability.kt`/`CapabilityExecutor.kt`) :
+  `toggle_flashlight` (lampe torche, `CameraManager.setTorchMode`, permission
+  CAMERA déjà présente), `get_calendar_events` (lecture des prochains
+  événements, `CalendarContract`, nouvelle permission READ_CALENDAR),
+  `get_clipboard`/`set_clipboard` (presse-papier, aucune permission
+  runtime), `make_call` (`ACTION_CALL`, nouvelle permission CALL_PHONE,
+  même gabarit que `send_sms` déjà existant). Toutes apparaissent
+  automatiquement dans Tools & Permissions et déclenchent le dialog de
+  confirmation existant pour les capabilities sensibles
+  (`get_calendar_events`, `get_clipboard`, `make_call` marquées
+  `authRequiredDefault=true`) — aucun code UI supplémentaire nécessaire,
+  seul `ALL_CAPABILITIES` a été étendu.
+- Découverte dynamique des capabilities téléphone par
+  `plugin/hasan_delivery/tools.py` : l'app annonce ses capabilities activées
+  (envelope `system/capabilities` à chaque connexion WS,
+  `CapabilitySchema.kt::capabilitiesAnnouncementJson`), le relay les
+  persiste par device (`server/relay/pairing.py::Session.capabilities`,
+  nouvel endpoint `GET /capabilities`), et le plugin les récupère au
+  démarrage du gateway Hermes plutôt que de les coder en dur. Motivé par
+  `schemaToJson()` (`CapabilitySchema.kt`) qui existait déjà avec un
+  commentaire anticipant ce mécanisme mais n'était jamais appelée — et par
+  le risque de recréer, avec des schémas Python codés en dur, le même
+  problème de synchronisation à 3 endroits (`Capability.kt`,
+  `CapabilityExecutor.kt`, `tools.py`) que la migration MCP→plugin natif
+  (voir Removed) était censée simplifier. Conséquence : ajouter une
+  capability dans `Capability.kt` seul suffit désormais, aucune édition
+  côté serveur/plugin nécessaire (voir docs/ARCHITECTURE.md).
+- Demande d'exemption de l'optimisation batterie (onboarding + Réglages) —
+  absente jusqu'ici, cause la plus fréquente de "le wake word s'arrête
+  tout seul" sur MIUI/EMUI/ColorOS/OneUI/OxygenOS (ces OEM tuent le service
+  foreground en arrière-plan malgré `START_STICKY`). Remplace l'ancienne
+  note statique Huawei sans action réelle par un vrai bouton (`ACTION_
+  REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) fonctionnant sur tous les OEM,
+  avec statut visible dans Réglages → Wake Word.
+- Onboarding : la permission notifications (`POST_NOTIFICATIONS`) est
+  désormais demandée en même temps que le micro (une seule invite groupée,
+  `ActivityResultContracts.RequestMultiplePermissions`) plutôt que
+  découverte plus tard dans le flux — `MainActivity` garde un filet de
+  sécurité si l'une des deux est refusée à l'onboarding ou si celui-ci est
+  sauté. Drawer : âge relatif affiché à droite de chaque session
+  (`TimeFormat.formatRelativeSessionAge`, paliers "-1h"/"+3d"/"+2w"/"+5m"/"+1y")
+  pour distinguer les sessions actives des anciennes sans ouvrir chacune ;
+  nouveau logo (`hasan_logo_halo.png`) dans le header à la place du glyphe
+  vectoriel `ic_hasan_brand_glyph`.
+
+### Removed
+- `plugin/tools/android_tool.py` — code mort confirmé : n'a jamais été
+  déployé sur le VPS de dev (`find ~/.hermes -iname android_tool.py` vide),
+  jamais référencé par `install-plugin.sh` ni aucun autre mécanisme
+  d'installation. Le vrai système d'exposition des capabilities téléphone
+  à Hermes (SMS, localisation, etc.) est `~/.hermes/phone-relay-mcp/server.js`
+  (MCP en Node.js, hors de ce repo, 4 process actifs confirmés, modifié le
+  24/07) — les deux visaient le même besoin (exposer les capabilities via
+  `POST /bridge/command`), seul le second a jamais été branché en
+  production. Référence CI (`plugin-lint.yml`) et commentaires pointant
+  vers ce fichier mis à jour en conséquence.
+- Outil agent `share_file` et endpoint `GET /api/attachments-out/...`
+  (hors de ce repo git, sur le VPS) — introduits le 2026-07-21, retirés le
+  lendemain après avoir buté sur un `combinedClickable` Compose qui
+  empêchait tout clic sur le lien Markdown généré dans les bulles de chat.
+  Remplacés par l'onglet Fichiers (accès direct au workspace de session, pas
+  besoin d'un outil dédié pour "publier" un fichier). Détails complets :
+  `archive/2026-07-21-hermes-hallucination-attachments-out.md`.
+- SkillClaw (proxy LLM local + auto-évolution de skills, hors de ce repo
+  git, sur le VPS) — remplacé par le curator natif Hermes (`hermes
+  curator`, déjà présent, `enabled: true`). Périmètre différent : le
+  curator natif ne gère que les skills créées dynamiquement par l'agent,
+  pas la bibliothèque bundled/hub — ce n'était de toute façon pas ce que
+  SkillClaw gérait non plus dans cette partie. Résidus nettoyés
+  (`~/.skillclaw/`, `~/.hermes/.skillclaw_backups/`, logs temporaires).
+  Détails complets : `archive/2026-07-28-retrait-skillclaw-webui-down.md`.
+- `~/.hermes/phone-relay-mcp/server.js` (MCP Node.js, hors de ce repo) —
+  entièrement remplacé par `plugin/hasan_delivery/tools.py` (tools natifs
+  Hermes, découverte dynamique — voir Added). Retiré de
+  `~/.hermes/config.yaml` (`mcp_servers.phone_relay`), processus et
+  watchdogs stoppés, dossier supprimé du VPS (~27 Mo). `hermes-dashboard`
+  et `hermes-webui` avaient chacun leur propre process MCP orphelin
+  (démarré avant la migration) : un simple restart du gateway ne les
+  arrête pas, il a fallu redémarrer aussi ces deux services pour que les
+  derniers process `node server.js` disparaissent.
+
+### Changed
+- Onglet Skills retiré de la sidebar (drawer), fusionné comme troisième
+  pill dans l'écran Mémoire (`MEMORY / SKILLS / INSIGHTS`, entre Memory et
+  Insights) — désencombre la navigation principale (6 entrées au lieu de 7)
+  en regroupant deux écrans lecture-seule conceptuellement proches, cohérent
+  avec la prospective #2 de l'audit 4-volets ("Fusion Skills + Memory en
+  une section Agent Insights"). `SkillsViewModel`/`SkillsScreen` inchangés
+  dans leur logique (liste groupée par catégorie, détail, refresh) —
+  seulement hébergés par `MemoryFragment` au lieu d'un `SkillsFragment`
+  dédié (supprimé), avec le header hamburger dédupliqué
+  (`SkillsScreen.showMenuHeader = false` dans ce contexte).
+- Simplification de la connexion manuelle (Réglages → Connexions →
+  Configuration manuelle) : le code de pairing relay est désormais masqué
+  comme le mot de passe hermes-webui (`isSecret = true`, était visible en
+  clair) ; éditer l'un ou l'autre champ déclenche une authentification
+  biométrique/PIN de l'appareil avant de passer en mode édition (même
+  garde-fou déjà utilisé pour le switch d'activation du relay,
+  `BiometricAuthHelper`) ; les boutons "Appairer manuellement" et
+  "Déconnecter le relay (dépairing)" sont retirés — le bouton "Se
+  connecter" du panneau de statut gère maintenant le pairing relay ET la
+  connexion chat en un seul geste (`SettingsFragment.connectToWebUi()`
+  appelle `viewModel.pairManually()` avant le login webui si le relay
+  n'est pas déjà appairé et que URL+code manuels sont renseignés).
+- `buildMetadataText()` (`ChatScreen.kt`) n'omet plus la métadonnée
+  "Xs · Y tok" sous une réponse quand `duration_ms`/`output_tokens` sont
+  absents ou nuls — ce garde-fou avait été ajouté pour éviter un affichage
+  trompeur "0s · 0 tok" pendant l'épisode SkillClaw (le proxy omettait
+  `usage` en streaming, voir
+  `archive/2026-07-26-tokens-duree-non-affiches-chat.md`). Devenu inutile
+  depuis le retrait de SkillClaw (DeepSeek natif renvoie `usage`
+  correctement) — remis au comportement simple d'origine.
+
+### Fixed
+- `_send_fcm_wake` (`server/relay/server.py`) appelait
+  `run_in_executor(None, messaging.send, message, fcm_app)` — le 3e argument
+  positionnel atterrit sur `dry_run` (signature réelle :
+  `send(message, dry_run=False, app=None)`), pas sur `app`. `bool(fcm_app)`
+  étant toujours vrai, chaque envoi passait silencieusement en mode dry-run :
+  `messaging.send()` retournait `projects/.../messages/fake_message_id` sans
+  jamais contacter Google, donc sans jamais réveiller le device — aucune
+  exception levée, `log.info("Réveil FCM envoyé...")` s'affichait quand même.
+  Découvert uniquement via test réel sur device (aucun test existant
+  n'exerçait le vrai appel `messaging.send`, tous mockaient `_send_fcm_wake`
+  dans son ensemble). Fix : `functools.partial(messaging.send, message,
+  app=fcm_app)` pour forcer `app` en keyword. Nouveau test de régression
+  (`test_send_fcm_wake_passes_app_as_keyword`) qui mocke `messaging.send`
+  lui-même plutôt que `_send_fcm_wake`.
+- Canal `proactive` (WebSocket) jamais affiché comme notification Android
+  quand l'app est en arrière-plan mais son WebSocket encore actif —
+  `MainViewModel` ne faisait que logger l'événement dans `ActivityLog`
+  (`tag = "PUSH"`, visible seulement via Réglages → À propos → Voir les
+  logs) sans jamais appeler `ProactiveNotifier.show()`. La classe
+  `ProactiveMessageHandler`, écrite précisément pour ce cas, n'était
+  instanciée nulle part dans l'app — code mort depuis sa création. Découvert
+  en testant le scénario "app en arrière-plan" après validation des deux
+  scénarios FCM (redémarrage téléphone, fermeture via bouton Quitter), qui
+  fonctionnaient déjà. Fix : `MainViewModel` appelle directement
+  `ProactiveNotifier.show()` quand `!isAppInForeground()` (même pattern déjà
+  utilisé pour le canal `chat`/`NotificationHelper`) ; `ProactiveMessageHandler`
+  supprimé (logique dupliquée, jamais câblée).
+- `PairingManager.get_session_by_device_hash()` (`server/relay/pairing.py`)
+  retournait la première session trouvée pour un device (ordre d'insertion,
+  donc la plus ancienne) au lieu de la plus récente — un device accumule une
+  nouvelle session à chaque reconnexion WS au lieu de réutiliser une session
+  existante (limitation connue, pas corrigée ici), donc `GET /capabilities`
+  pouvait retourner les capabilities d'une session morte depuis des mois
+  plutôt que celles de la session active. Découvert en déployant la
+  découverte dynamique (voir Added) : `GET /capabilities` renvoyait
+  systématiquement `[]` malgré un envelope `system/capabilities` correctement
+  reçu et persisté. Fix : sélectionne la session avec `max(last_seen_at)`
+  parmi celles du device.
+- `plugin/hasan_delivery/tools.py` enregistrait ses tools via
+  `tools.registry.registry.register()` directement plutôt que
+  `ctx.register_tool()` — le tool était bien invocable, mais le toolset
+  `hasan_phone` restait invisible pour `hermes tools enable`/`list`
+  ("Unknown toolset"), car seul `ctx.register_tool()` alimente la liste
+  d'attribution interne (`PluginManager._plugin_tool_names`) que Hermes
+  utilise pour reconnaître un toolset comme fourni par un plugin. Fix :
+  `tools.py` expose `register_tools(ctx)`, appelée depuis
+  `__init__.py::register(ctx)` avec le `ctx` reçu du loader de plugins
+  (au lieu d'un effet de bord à l'import du module, qui ne se produisait
+  d'ailleurs jamais : `__init__.py` n'importait que `.adapter`, jamais
+  `.tools` — confirmé en production via `hermes chat`, qui ne trouvait que
+  l'ancien tool MCP `mcp__phone_relay__get_battery`, jamais de tool natif).
+- Connexion WebUI (chat) impossible depuis l'app — deux causes distinctes
+  côté VPS, corrigées l'une après l'autre :
+  1. `hermes-webui.service` était arrêté depuis le 26/07 (dernier appel LLM
+     avait échoué en boucle vers le proxy SkillClaw sur
+     `127.0.0.1:30000`, entre-temps désinstallé par l'utilisateur, puis le
+     service systemd n'avait jamais redémarré). Fix :
+     `systemctl start hermes-webui.service`.
+  2. Une fois le service relancé, le login échouait encore en 401 via
+     l'URL publique alors qu'il réussissait en local (`127.0.0.1:8787`) —
+     `~/.hermes/Caddyfile` routait `:443` vers le mauvais backend
+     (`127.0.0.1:9119`, le dashboard interne `hermes`, pas
+     `127.0.0.1:8787`). Un fichier de config correct existait déjà
+     (`/tmp/Caddyfile.new`, jamais appliqué) ; appliqué + ajusté le chemin
+     de log (permissions). Voir
+     `archive/2026-07-28-retrait-skillclaw-webui-down.md`.
+- Guard `RECORD_AUDIO` manquant sur `MainViewModel.sendWakeWordIntent()` —
+  seul des quatre points d'appel au service wake word encore exposé au
+  crash `SecurityException` déjà corrigé ailleurs (`swapWakeWordModel`,
+  `setWakeWordSensitivity`) : `HassanWakeWordService.onCreate()` appelle
+  `startForeground(MICROPHONE)` sans condition sur l'`action` reçue, donc
+  n'importe quel `startService()` sur un service mort peut re-déclencher le
+  crash, pas seulement `ACTION_RESUME`. Vérifié sur device (permission
+  révoquée, deux taps successifs sur le toggle wake word) : plus de crash.
+- Écran noir après "Quitter l'app" dans un scénario précis : lancer l'app,
+  revenir au home, retaper sur la notification persistante du wake word, puis
+  quitter. `MainActivity` n'avait pas de `launchMode` déclaré (défaut
+  `standard`) — le `PendingIntent` de la notification
+  (`FLAG_ACTIVITY_NEW_TASK`) empilait une deuxième instance de `MainActivity`
+  par-dessus la première dans la même Task à chaque tap. "Quitter"
+  (`finishAndRemoveTask()`) ne fermait que l'instance du sommet ; celle du
+  dessous, jamais rafraîchie depuis sa mise en pause, remontait au premier
+  plan avec un rendu Compose invalide (écran noir). Fix :
+  `android:launchMode="singleTask"` sur `MainActivity` + `onNewIntent()` pour
+  router tout relaunch vers l'instance existante au lieu d'en créer une
+  nouvelle. Reproduit et vérifié via `adb` (flags identiques au
+  `PendingIntent` réel) avant et après le fix.
+- Bouton "Quitter l'app" (drawer) ne garantissait pas l'arrêt réel de
+  `HassanWakeWordService` : `quitApp()` (`MainActivity.kt`) appelait
+  `stopService()` (demande d'arrêt asynchrone) immédiatement suivi de
+  `killProcess()` — si le kill intervenait avant qu'Android ait traité la
+  demande, le système pouvait interpréter la mort du process comme un kill
+  mémoire externe et relancer le service en `START_STICKY` (comportement
+  par défaut de `onStartCommand`), laissant l'écoute wake word active en
+  tâche de fond malgré "Quitter". Fix : `startService()` avec l'action
+  `ACTION_STOP` déjà présente dans le service (`stopForeground` +
+  `stopSelf()` + retour explicite `START_NOT_STICKY`), qui s'exécute de
+  façon synchrone avant que `killProcess()` ne soit atteint.
+- Cinq points de l'audit punch-hole/coins arrondis Pixel 10
+  (`archive/2026-07-23-audit-boutons-masque-punch-hole-pixel10.md`) :
+  - Titre "TOOLS & PERMISSIONS" chevauché à 0px par la découpe caméra —
+    `ToolsPermissionsHeader` (titre + hamburger sur la même ligne, centre
+    non réservé) remplacé par `HasanMinimalHeader` + `ScreenTitle` sur sa
+    propre ligne (seul écran où le titre est trop long pour tenir à droite
+    du hamburger sans toucher le punch-hole, centré à mi-écran).
+  - Hamburger de `ToolsPermissionsScreen` décalé de 11px vers la gauche
+    (`SpacingL` au lieu de `SpacingXl`, incohérent avec tous les autres
+    écrans) — corrigé par le même remplacement.
+  - Bouton "Joindre un fichier" (Chat) débordant de ~5px dans le coin
+    arrondi bas-gauche — padding start de la barre de saisie passé de
+    `SpacingL` à `SpacingXl`.
+  - QR Scanner sans bouton retour visible dans l'UI (seul le bouton back
+    matériel fonctionnait) — bouton retour ajouté en haut-gauche
+    (`activity_qr_scanner.xml`), `finish()` sans `setResult()` explicite
+    (même comportement `RESULT_CANCELED` que le bouton back).
+  - Items de nav du drawer (~40dp mesurés) et icône "+" du FAB Kanban
+    (décentrée verticalement, line-height typographique par défaut) sous
+    ou proches du seuil tactile 48dp — `heightIn(min = TouchTarget)` sur
+    `DrawerNavRow`, `lineHeight = fontSize` sur le glyphe "+" du FAB.
+- Titre à droite du hamburger : incohérent selon les écrans (Fichiers/
+  TaskEditor l'avaient à droite du bouton retour, Tâches/Kanban/Mémoire/
+  Paramètres/Tools l'avaient soit absent soit en dessous). Uniformisé sur
+  "à droite du hamburger" (préférence explicite, même emplacement que
+  "HASAN" dans `HasanHeader` côté Chat) via un nouveau paramètre
+  `HasanMinimalHeader(title = ...)`, sauf Tools & Permissions qui reste
+  en dessous (voir point punch-hole ci-dessus, seul conflit réel constaté).
+- Incohérence de header/titre entre écrans : `TaskEditorScreen` n'avait
+  aucun bouton retour visible (seul un bouton "Annuler" tout en bas du
+  formulaire, après scroll potentiel), `SettingsScreen` et `FilesScreen`
+  n'affichaient pas le nom de l'écran. Alignés sur le pattern déjà utilisé
+  par Kanban/Skills (titre stylé sous le header minimal). Audit 4-volets
+  finding #8. Étendu ensuite à Tâches, Kanban et Mémoire (même trou, repéré
+  après coup) via un composable partagé `ScreenTitle` (`HasanHeader.kt`).
+- Slider "Sensibilité du wake word" (Réglages) sans effet réel — écrivait la
+  préférence mais n'avertissait jamais `HassanWakeWordService`, qui gardait
+  un seuil de détection codé en dur (0.5) ignorant totalement le réglage
+  utilisateur. Fix : nouvelle action `ACTION_SET_SENSITIVITY`, réutilise le
+  mécanisme de hot-swap déjà en place pour le changement de modèle
+  (`WakeWordModel.threshold` de la lib `openwakeword` est immuable, seul un
+  nouvel engine peut appliquer un nouveau seuil). Le service lit aussi
+  désormais la sensibilité stockée au démarrage. Audit 4-volets finding #9.
+- Base Room (`hasan.db`, historique complet des conversations) stockée en
+  clair sur disque — chiffrement via SQLCipher
+  (`net.zetetic:android-database-sqlcipher`), clé aléatoire 256 bits générée
+  au premier lancement post-update et stockée dans
+  `EncryptedSharedPreferences` (même fichier `hasan_secure_prefs` que les
+  tokens/certificats TOFU, voir `SettingsManager.getOrCreateRoomDbKey()`).
+  Migration automatique du fichier existant non chiffré vers chiffré
+  (`HassanDatabase.migratePlaintextDbIfNeeded()`, via
+  `sqlcipher_export` — sans réécriture manuelle table par table), avec
+  backup `hasan.db.bak` conservé indéfiniment comme filet de récupération.
+  Testé bout en bout sur device réel avec des données de production
+  réelles : migration, lecture de l'historique existant, écriture d'un
+  nouveau message, persistance après redémarrage complet de l'app. Audit
+  4-volets finding #6.
+- Liens Markdown non cliquables dans les bulles de chat (`MarkdownText.kt`) :
+  `TextView.setTextIsSelectable(true)` réinitialise `movementMethod` en
+  interne à chaque appel — comme `update()` de l'`AndroidView` interop se
+  réexécute à chaque recomposition (streaming token par token en
+  particulier), `LinkMovementMethod` posé une seule fois dans `factory`
+  était écrasé dès la première recomposition suivant le montage. Fix :
+  réappliquer `movementMethod` après `setTextIsSelectable` dans `update`.
+  Trouvé lors de l'audit 4-volets (finding #3,
+  `archive/2026-07-23-audit-4-volets-decouverte-ui-utilite-securite-perf.md`).
+- Board Kanban visuellement illisible (colonnes horizontales sans cadre ni
+  séparation visuelle, cf. audit 4-volets finding #1) — refonte en liste
+  verticale groupée par colonne avec pills de navigation, sections
+  collapsibles, bande de couleur par priorité sur les cartes, déplacement
+  via bottom sheet (remplace le menu `⋮` minuscule et peu contrasté) et FAB
+  de création de tâche (`POST /api/kanban/tasks`, endpoint déjà existant
+  côté serveur mais jamais consommé par l'app jusqu'ici).
+- `LatencyLog.mark()` (fichier disque `latency.log`, non chiffré, sans gate
+  debug/release) loggait en clair les paramètres et résultats des
+  capabilities bridge sensibles (`send_sms`, `get_location`, `get_contacts`)
+  — numéro + contenu de SMS, position GPS exacte, contacts consultés. Fix :
+  redaction (`[redacted]`) de `params`/`data`/`message` dans
+  `BridgeCommandHandler.kt` pour les capabilities marquées
+  `authRequiredDefault=true`, sans toucher au diagnostic latence du reste du
+  pipeline (audit 4-volets finding #4).
+- Rework du panel de statut connexions (Réglages) : un `Text` avec
+  `Modifier.weight(1f)` dans une `Row` sans `fillMaxWidth()` gonflait la
+  hauteur du panel de ~475px et faisait disparaître le label "Relay
+  (téléphone)" du rendu.
+- Guard `RECORD_AUDIO` manquant sur `MainViewModel.sendWakeWordIntent()` —
+  seul des quatre points d'appel au service wake word encore exposé au
+  crash `SecurityException` déjà corrigé ailleurs (`swapWakeWordModel`,
+  `setWakeWordSensitivity`) : `HassanWakeWordService.onCreate()` appelle
+  `startForeground(MICROPHONE)` sans condition sur l'`action` reçue, donc
+  n'importe quel `startService()` sur un service mort peut re-déclencher le
+  crash, pas seulement `ACTION_RESUME`. Vérifié sur device (permission
+  révoquée, deux taps successifs sur le toggle wake word) : plus de crash.

@@ -39,7 +39,12 @@ class QrScannerActivity : AppCompatActivity() {
     private val requestCameraPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) startCamera() else finish()
+        if (granted) {
+            startCamera()
+        } else {
+            setResult(RESULT_CANCELED, Intent().putExtra(EXTRA_QR_ERROR, "permission_denied"))
+            finish()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,6 +53,13 @@ class QrScannerActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // Avant ce fix, seul le bouton back matériel Android fermait cet écran — aucune
+        // affordance visible dans l'UI, seul écran du parcours dans ce cas (voir
+        // archive/2026-07-23-audit-boutons-masque-punch-hole-pixel10.md). finish() sans
+        // setResult() explicite retourne RESULT_CANCELED par défaut, même comportement
+        // que le bouton back (MainViewModel affiche "Scan QR annulé" dans les deux cas).
+        binding.btnClose.setOnClickListener { finish() }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
@@ -96,6 +108,7 @@ class QrScannerActivity : AppCompatActivity() {
                 )
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Échec de binding CameraX: ${e.message}")
+                setResult(RESULT_CANCELED, Intent().putExtra(EXTRA_QR_ERROR, "camera_bind_failed"))
                 finish()
             }
         }, ContextCompat.getMainExecutor(this))
@@ -118,5 +131,7 @@ class QrScannerActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "QrScannerActivity"
         const val EXTRA_QR_TEXT = "qr_text"
+        /** Raison de l'échec quand resultCode != RESULT_OK : "permission_denied" ou "camera_bind_failed". */
+        const val EXTRA_QR_ERROR = "qr_error"
     }
 }

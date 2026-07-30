@@ -13,7 +13,7 @@ import org.json.JSONObject
 
 /**
  * Exécute les commandes reçues sur le canal `bridge` du relay WebSocket (voir
- * server/relay/bridge_commands.py côté serveur, plugin/tools/android_tool.py
+ * server/relay/bridge_commands.py côté serveur, plugin/hasan_delivery/tools.py
  * côté Hermes) et renvoie le résultat via la même connexion.
  *
  * S'exécute dans MainViewModel — l'app est nécessairement au premier plan ou
@@ -46,8 +46,14 @@ class BridgeCommandHandler(
         // seul activityLog (écran "Activité" de l'app) recevait ce log, invisible dans
         // latency.log/adb pull, ce qui a rendu très difficile le diagnostic du chemin
         // send_sms qui semblait ne jamais atteindre ce handler (voir archive/2026-07-16-
-        // bridge-mcp-confirmation-bypass.md).
-        LatencyLog.mark("BRIDGE_COMMAND", commandId, "capability=$capability params=$params")
+        // bridge-mcp-confirmation-bypass.md). params/data des capabilities sensibles
+        // (authRequiredDefault=true : send_sms, get_location, get_contacts) sont
+        // redactées ici — latency.log est un fichier disque non chiffré, sans gate
+        // debug/release (voir archive/2026-07-23-audit-4-volets-...md finding #4) : le
+        // contenu d'un SMS, une position GPS exacte ou des contacts consultés ne doivent
+        // pas y transiter en clair, même si ça réduit la précision du diagnostic latence
+        // pour ces trois capabilities précises.
+        LatencyLog.mark("BRIDGE_COMMAND", commandId, "capability=$capability params=${paramsForLog(capability, params)}")
 
         if (capability == null) {
             respond(commandId, capability = null, error = "missing_capability")
@@ -55,7 +61,7 @@ class BridgeCommandHandler(
         }
         if (!settings.isCapabilityEnabled(capability)) {
             LatencyLog.mark("BRIDGE_REJECTED", commandId, "capability=$capability reason=capability_disabled")
-            respond(commandId, capability = capability, error = "capability_disabled")
+            respond(commandId, capability = capability, error = "capability_disabled_by_user")
             return
         }
         val permission = ALL_CAPABILITIES.find { it.name == capability }?.permission
@@ -79,11 +85,11 @@ class BridgeCommandHandler(
 
         when (val result = executor.execute(capability, params)) {
             is CapabilityResult.Success -> {
-                LatencyLog.mark("BRIDGE_SUCCESS", commandId, "capability=$capability data=${result.data}")
+                LatencyLog.mark("BRIDGE_SUCCESS", commandId, "capability=$capability data=${dataForLog(capability, result.data)}")
                 respond(commandId, capability = capability, data = result.data)
             }
             is CapabilityResult.Error -> {
-                LatencyLog.mark("BRIDGE_ERROR", commandId, "capability=$capability message=${result.message}")
+                LatencyLog.mark("BRIDGE_ERROR", commandId, "capability=$capability message=${dataForLog(capability, result.message)}")
                 respond(commandId, capability = capability, error = result.message)
             }
             CapabilityResult.PermissionDenied -> {
@@ -94,7 +100,21 @@ class BridgeCommandHandler(
     }
 
     private fun respond(commandId: String, capability: String?, data: JSONObject? = null, error: String? = null) {
-        val result = data ?: JSONObject().apply { put("error", error) }
+        // Un code d'erreur brut ("capability_disabled_by_user") remonte tel quel jusqu'au
+        // LLM via tools.py (json.dumps sans reformulation) — un champ "message"
+        // explicite évite que le LLM interprète à
+        // tort un code ambigu comme un problème de config/permission à corriger plutôt
+        // qu'un choix délibéré et permanent de l'utilisateur (Réglages → Tools & Permissions).
+        val result = data ?: JSONObject().apply {
+            put("error", error)
+            if (error == "capability_disabled_by_user") {
+                put(
+                    "message",
+                    "L'utilisateur a volontairement désactivé cette fonctionnalité dans les réglages de l'app. " +
+                        "Ce n'est pas un problème technique — ne pas suggérer de vérifier une config ou une permission."
+                )
+            }
+        }
         val envelope = Envelope(
             channel = "bridge",
             type = "command_result",
@@ -111,9 +131,19 @@ class BridgeCommandHandler(
     private fun activityTitleFor(capability: String?, error: String?): String = when (error) {
         null -> "Bridge OK : $capability"
         "missing_capability" -> "Bridge refusé : capability manquante"
-        "capability_disabled" -> "Bridge refusé ($capability) : capability désactivée"
+        "capability_disabled_by_user" -> "Bridge refusé ($capability) : capability désactivée par l'utilisateur"
         "permission_denied" -> "Bridge refusé ($capability) : permission manquante"
         "confirmation_denied" -> "Bridge refusé ($capability) : confirmation utilisateur refusée"
         else -> "Bridge erreur ($capability) : $error"
     }
+
+    /** true pour les capabilities dont le payload/résultat contient des données personnelles (voir Capability.authRequiredDefault). */
+    private fun isSensitive(capability: String?): Boolean =
+        ALL_CAPABILITIES.find { it.name == capability }?.authRequiredDefault == true
+
+    private fun paramsForLog(capability: String?, params: JSONObject): Any =
+        if (isSensitive(capability)) "[redacted]" else params
+
+    private fun dataForLog(capability: String?, value: Any?): Any =
+        if (isSensitive(capability)) "[redacted]" else (value ?: "null")
 }

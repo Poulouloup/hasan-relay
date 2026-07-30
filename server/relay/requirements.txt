@@ -1,2 +1,8 @@
 aiohttp>=3.9
 aiohttp-cors
+
+# Optionnel — réveil FCM data-only des notifications proactives quand l'app
+# n'a pas de WS actif (voir _send_fcm_wake dans server.py). Le relay démarre
+# et fonctionne normalement sans cette dépendance/sans RELAY_FCM_CREDENTIALS_PATH
+# configuré — dégradation gracieuse, pas un prérequis dur.
+firebase-admin>=6.5

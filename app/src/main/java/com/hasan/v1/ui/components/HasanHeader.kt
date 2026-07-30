@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,48 +25,53 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hasan.v1.R
 import com.hasan.v1.ui.theme.ChakraPetch
 import com.hasan.v1.ui.theme.HasanColors
+import com.hasan.v1.ui.theme.HasanDimens
 import com.hasan.v1.ui.theme.HasanShapes
 import com.hasan.v1.ui.theme.IBMPlexMono
 
 /**
- * État de connexion affiché dans le header — dérivé de
- * [com.hasan.v1.network.RelayConnectionStatus] côté appelant (ConversationFragment),
- * pas un doublon d'enum : ce composant reste agnostique du type exact pour être
- * réutilisable indépendamment du réseau relay (ex: futur badge orchestrateur MCP).
+ * État d'un badge de connexion affiché dans le header. Deux instances
+ * distinctes cohabitent — une pour hermes-webui (transport du chat, dérivée
+ * de `serverConnected && webUiLoggedIn`), une pour le relay bridge (SMS,
+ * localisation, dérivée de [com.hasan.v1.network.RelayConnectionStatus]) —
+ * voir ConversationFragment.updateConnectionBadges(). Les deux systèmes sont
+ * indépendants depuis la migration webui, d'où la séparation visuelle (cf.
+ * WebUiConnectionSection/RelayBridgeSection dans SettingsScreen.kt).
  */
 data class ConnectionBadgeState(
     val connected: Boolean,
-    /** ex: "WSS · 42MS" — déjà formaté par l'appelant, ce composant ne fait pas de logique métier. */
+    /** ex: "HERMES · CONNECTÉ" — déjà formaté par l'appelant, ce composant ne fait pas de logique métier. */
     val readout: String
 )
 
-/** Header — hamburger (ouvre le drawer), logo à coin diagonal, wordmark HASAN, badge de
- * connexion avec point pulsant. Voir .header dans hasan-mockup-v2.html. */
+/** Header — hamburger (ouvre le drawer), logo à coin diagonal, wordmark HASAN, badges de
+ * connexion (hermes-webui + relay bridge) avec point pulsant. Voir .header dans hasan-mockup-v2.html. */
 @Composable
 fun HasanHeader(
-    connectionState: ConnectionBadgeState,
+    hermesState: ConnectionBadgeState,
+    bridgeState: ConnectionBadgeState,
     onMenuClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+            .padding(horizontal = HasanDimens.SpacingXl, vertical = HasanDimens.SpacingM),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Image(
-                painter = painterResource(R.drawable.ic_menu_hamburger),
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)) {
+            HasanIconButton(
+                iconRes = R.drawable.ic_menu_hamburger,
                 contentDescription = "Menu",
-                colorFilter = ColorFilter.tint(HasanColors.TextPrimary),
-                modifier = Modifier.size(22.dp).clickable(onClick = onMenuClick)
+                onClick = onMenuClick
             )
             BrandMark()
             Text(
@@ -73,12 +79,63 @@ fun HasanHeader(
                 color = HasanColors.TextPrimary,
                 fontFamily = ChakraPetch,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                fontSize = 15.sp,
+                fontSize = HasanDimens.TextDisplaySmall,
                 letterSpacing = 2.sp
             )
         }
-        ConnectionBadge(connectionState)
+        Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(HasanDimens.SpacingXxs)) {
+            ConnectionBadge(hermesState)
+            ConnectionBadge(bridgeState)
+        }
     }
+}
+
+/**
+ * Bouton icône à zone tactile 48dp (norme Material) — icône visuelle 24dp
+ * centrée. Remplace les Image+clickable bruts dupliqués précédemment dans
+ * HasanHeader (hamburger 22dp) et HasanDrawer (hamburger + close, 22dp/20dp),
+ * qui n'offraient pas de marge tactile suffisante (zone cliquable = taille
+ * exacte de l'icône, aucune marge d'erreur au toucher).
+ */
+@Composable
+fun HasanIconButton(
+    iconRes: Int,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = HasanColors.TextPrimary
+) {
+    Box(
+        modifier = modifier
+            .size(HasanDimens.TouchTarget)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            painter = painterResource(iconRes),
+            contentDescription = contentDescription,
+            colorFilter = ColorFilter.tint(tint),
+            modifier = Modifier.size(HasanDimens.IconMedium)
+        )
+    }
+}
+
+/**
+ * Titre d'écran affiché sous [HasanMinimalHeader] — pattern partagé entre les
+ * onglets qui n'avaient qu'un sous-header contextuel (compteur, board actif)
+ * sans nom d'écran littéral (audit 4-volets finding #8, étendu à
+ * Tâches/Kanban/Mémoire après retour utilisateur).
+ */
+@Composable
+fun ScreenTitle(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        color = HasanColors.TextPrimary,
+        fontFamily = ChakraPetch,
+        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+        fontSize = HasanDimens.TextTitleMedium,
+        modifier = modifier.padding(horizontal = HasanDimens.SpacingL, vertical = HasanDimens.SpacingXs)
+    )
 }
 
 @Composable
@@ -91,9 +148,10 @@ private fun BrandMark() {
         contentAlignment = Alignment.Center
     ) {
         Image(
-            painter = painterResource(R.drawable.ic_hasan_brand_glyph),
+            painter = painterResource(R.drawable.hasan_logo_halo),
             contentDescription = null,
-            modifier = Modifier.size(15.dp)
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(34.dp)
         )
     }
 }
@@ -124,7 +182,7 @@ private fun ConnectionBadge(state: ConnectionBadgeState) {
             text = state.readout,
             color = HasanColors.TextMutedA11y,
             fontFamily = IBMPlexMono,
-            fontSize = 9.sp,
+            fontSize = HasanDimens.TextLabelSmall,
             letterSpacing = 0.5.sp
         )
     }

@@ -12,7 +12,7 @@ Hasan was born following the release and spread of **[Hermes Agent](https://gith
 
 1. **Security** — no hardcoded secrets, everything goes through EncryptedSharedPreferences. TOFU (Trust On First Use) certificate verification for self-signed servers. The source code is auditable, no surprises.
 2. **Lightness** — minimal pipeline: local ONNX wake word → native Android STT → SSE to Hermes → on-device TTS. No unnecessary dependencies, no proprietary third-party SDK.
-3. **Maximum privacy** — zero calls to external third-party servers. Wake word runs 100% locally (ONNX). The LLM runs on your own machine via Hermes. Only STT still depends on Google Speech Services (Whisper ONNX migration planned for V2).
+3. **Maximum privacy** — the LLM and all message content stay on your own server. Wake word runs 100% locally (ONNX). The only external dependency is an optional, content-free wake-up signal via Firebase Cloud Messaging (Google sees only "wake up this device now", never the notification text) needed to receive proactive notifications while the app is fully closed, without a permanently running background service — disabled by default, degrades gracefully to WebSocket-only delivery if not configured (see `docs/ARCHITECTURE.md`). STT still depends on Google Speech Services (Whisper ONNX migration planned for V2).
 
 ---
 
@@ -72,10 +72,14 @@ Pairing with the relay is done once via QR code (`QrScannerActivity` → `Pairin
 - **Dark premium UI** — 100% Jetpack Compose (Chat / Activity / Settings), cut-corner design system, wave animations
 - **Room persistence** — full conversation history with sessions
 - **Sessions** — multiple Hermes sessions, auto-titled from the first message, rename/delete from the drawer
+- **Kanban board** — consult and move tasks between columns, create boards, powered by hermes-webui's existing Kanban API
+- **Session files** — browse and download the active session's workspace (files the agent wrote), powered by hermes-webui's existing file-listing API
 - **Push notifications** — background responses trigger Android notifications
+- **FCM wake-up for proactive notifications** (optional) — receive Hermes-initiated notifications (e.g. cron job reminders) even while the app is fully closed, without a permanently running background service. Strictly data-only: Firebase only carries an opaque wake-up signal, the actual text is fetched afterwards from your own relay over TLS. Degrades gracefully to WebSocket-only delivery if not configured — see `docs/ARCHITECTURE.md` and `SETUP.md`
 - **Light Mode** — full-screen hands-free interface with large mic button, TTS mute, and wake word listening
 - **TOFU certificate verification** — Trust On First Use for the relay's self-signed HTTPS/WSS
 - **No external account** — no API key, no subscription required
+- **One-command server deployment** — `server/install-bridge.sh` provisions the relay and Caddy TLS termination (Docker Compose) plus the Hermes plugin in a single interactive run
 
 ---
 
@@ -121,7 +125,8 @@ hasanv1/
         └── utils/                       # HasanDialog, MarkdownUtils, LatencyLog
 ```
 
-→ See [SETUP.md](SETUP.md) to build and run the project.
+→ See [SETUP.md](SETUP.md) to build and run the project from source.
+→ See [DEPLOYMENT.md](DEPLOYMENT.md) to deploy the relay server + plugin on your own Hermes VPS.
 
 ---
 
@@ -160,7 +165,10 @@ hasanv1/
 | Push notifications (background responses) | ✅ |
 | Clarify (mid-turn clarifying questions) | ✅ |
 | Device bridge with confirmation dialog | ✅ |
+| Kanban board (read + move cards + create boards) | ✅ |
+| Session files (browse + download workspace) | ✅ |
 | Light Mode (full-screen hands-free) | ✅ |
+| One-command bridge deployment (relay + Caddy + plugin, Docker Compose) | ✅ |
 | Offline local STT (Whisper ONNX) | 🔜 V2 |
 | High-quality TTS (Piper) | 🔜 V2 |
 

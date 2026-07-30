@@ -8,8 +8,9 @@ import androidx.security.crypto.MasterKey
 /**
  * Lecture et écriture de tous les paramètres de l'application.
  *
- * Les données sensibles (URL serveur, token) sont stockées dans EncryptedSharedPreferences.
- * Les préférences non sensibles (toggles, sliders) utilisent des prefs normales.
+ * Les données sensibles (URL serveur webui/relay, tokens, certificats) sont stockées
+ * dans EncryptedSharedPreferences. Les préférences non sensibles (toggles, sliders)
+ * utilisent des prefs normales.
  */
 class SettingsManager(context: Context) {
 
@@ -17,22 +18,20 @@ class SettingsManager(context: Context) {
 
     companion object {
         // Valeurs par défaut
-        const val DEFAULT_SERVER_URL   = "https://172.16.1.105:8443"
-        const val DEFAULT_AUTH_TOKEN   = "HASAN_DEV_TOKEN"
-        const val DEFAULT_MODEL        = "hermes-agent"
         const val DEFAULT_SENSITIVITY  = 0.5f
         const val DEFAULT_TTS_ENABLED  = true
         const val DEFAULT_WAKE_ENABLED = true
         const val DEFAULT_VOLUME       = 100f
         const val DEFAULT_SPEED        = 1.0f
 
-        // Modèles wake word disponibles dans assets/
+        // Modèles wake word disponibles dans assets/ — nommés hasan-JJ-MM-YYYY selon leur
+        // date d'ajout (pas de sens fonctionnel dans le nom, juste un ordre chronologique).
         val WAKE_WORD_MODELS = listOf(
-            "ok_hasan_last_vers.onnx",
-            "ok_hasan_livekit.onnx",
-            "ok_hasan_v2_livekit.onnx"
+            "hasan-26-05-2026.onnx",
+            "hasan-27-05-2026.onnx",
+            "hasan-26-07-2026.onnx"
         )
-        const val DEFAULT_WAKE_WORD_MODEL = "ok_hasan_last_vers.onnx"
+        const val DEFAULT_WAKE_WORD_MODEL = "hasan-26-05-2026.onnx"
 
         // Voix Edge TTS françaises (endpoint non officiel "Lire à voix haute" de Microsoft Edge)
         val EDGE_TTS_VOICES = listOf(
@@ -44,20 +43,12 @@ class SettingsManager(context: Context) {
         )
         const val DEFAULT_TTS_VOICE = "fr-FR-HenriNeural"
 
+        private const val KEY_ROOM_DB_PASSPHRASE = "room_db_passphrase"
+
         // Provider TTS : "native" (Android TextToSpeech système) ou "edge" (Edge TTS cloud gratuit)
         const val TTS_PROVIDER_NATIVE = "native"
         const val TTS_PROVIDER_EDGE   = "edge"
         const val DEFAULT_TTS_PROVIDER = TTS_PROVIDER_NATIVE
-
-        private val MODELS = listOf(
-            "hermes-agent",
-            "claude-haiku",
-            "claude-sonnet",
-            "gpt-4o",
-            "custom"
-        )
-
-        fun getAvailableModels() = MODELS
     }
 
     // EncryptedSharedPreferences pour token et URL (données sensibles)
@@ -95,24 +86,6 @@ class SettingsManager(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("hasan_prefs", Context.MODE_PRIVATE)
 
-    // ─────────────────────── Connexion (chiffrées) ───────────────────────────
-
-    var serverUrl: String
-        get() = encryptedPrefs.getString("server_url", DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
-        set(value) = encryptedPrefs.edit().putString("server_url", value).apply()
-
-    var authToken: String
-        get() = encryptedPrefs.getString("auth_token", DEFAULT_AUTH_TOKEN) ?: DEFAULT_AUTH_TOKEN
-        set(value) = encryptedPrefs.edit().putString("auth_token", value).apply()
-
-    var model: String
-        get() = encryptedPrefs.getString("model", DEFAULT_MODEL) ?: DEFAULT_MODEL
-        set(value) = encryptedPrefs.edit().putString("model", value).apply()
-
-    var customModel: String
-        get() = encryptedPrefs.getString("custom_model", "") ?: ""
-        set(value) = encryptedPrefs.edit().putString("custom_model", value).apply()
-
     // ─────────────────────── Onboarding ────────────────────────────────────
 
     var onboardingCompleted: Boolean
@@ -125,8 +98,24 @@ class SettingsManager(context: Context) {
         get() = prefs.getBoolean("wake_word_enabled", DEFAULT_WAKE_ENABLED)
         set(value) = prefs.edit().putBoolean("wake_word_enabled", value).apply()
 
+    /**
+     * Intention utilisateur pour le relay bridge (switch Réglages) — distinct
+     * de [relaySessionToken] (le pairing). OFF = connexion WS coupée mais
+     * token conservé (pause simple, pas un dépairing) ; ON = reconnecter.
+     * Défaut true : un pairing existant reste actif tant que l'utilisateur
+     * ne l'a pas explicitement désactivé.
+     */
+    var relayEnabled: Boolean
+        get() = prefs.getBoolean("relay_enabled", true)
+        set(value) = prefs.edit().putBoolean("relay_enabled", value).apply()
+
     var wakeWordModel: String
-        get() = prefs.getString("wake_word_model", DEFAULT_WAKE_WORD_MODEL) ?: DEFAULT_WAKE_WORD_MODEL
+        // Retombe sur le défaut si la valeur stockée ne correspond plus à un modèle connu —
+        // cas d'un renommage de fichier assets/ (ancien nom orphelin en pref) qui laisserait
+        // sinon le RadioOptionGroup sans sélection et le service pointer vers un asset absent.
+        get() = prefs.getString("wake_word_model", DEFAULT_WAKE_WORD_MODEL)
+            ?.takeIf { it in WAKE_WORD_MODELS }
+            ?: DEFAULT_WAKE_WORD_MODEL
         set(value) = prefs.edit().putString("wake_word_model", value).apply()
 
     // Stocké en Int (1–10) pour éviter les erreurs d'arrondi float dans Material Slider
@@ -162,10 +151,6 @@ class SettingsManager(context: Context) {
     var ttsSpeed: Float
         get() = prefs.getFloat("tts_speed", DEFAULT_SPEED)
         set(value) = prefs.edit().putFloat("tts_speed", value).apply()
-
-    /** Retourne le nom effectif du modèle (résout "custom" → valeur du champ libre). */
-    fun effectiveModel(): String =
-        if (model == "custom" && customModel.isNotBlank()) customModel else model
 
     // ─────────────────────── Certificats de confiance TOFU ──────────────────
 
@@ -212,6 +197,24 @@ class SettingsManager(context: Context) {
             .filter { it.startsWith("trusted_cert_") }
             .forEach { editor.remove(it) }
         editor.apply()
+    }
+
+    /**
+     * Clé de chiffrement SQLCipher pour HassanDatabase (Room) — générée aléatoirement
+     * (256 bits, SecureRandom) au premier appel, puis stockée durablement dans
+     * EncryptedSharedPreferences (même fichier hasan_secure_prefs que les tokens/certs).
+     * Jamais recréée ensuite tant que le Keystore n'est pas corrompu — voir
+     * createEncryptedPrefs() pour le cas de reset (perte de clé acceptée, déjà le
+     * comportement existant pour tous les autres secrets de ce fichier).
+     */
+    fun getOrCreateRoomDbKey(): ByteArray {
+        val existing = encryptedPrefs.getString(KEY_ROOM_DB_PASSPHRASE, null)
+        if (existing != null) return android.util.Base64.decode(existing, android.util.Base64.NO_WRAP)
+        val newKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        encryptedPrefs.edit()
+            .putString(KEY_ROOM_DB_PASSPHRASE, android.util.Base64.encodeToString(newKey, android.util.Base64.NO_WRAP))
+            .apply()
+        return newKey
     }
 
     // ─────────────────────── Sessions Hermes ────────────────────────────────
@@ -264,6 +267,78 @@ class SettingsManager(context: Context) {
             return generated
         }
         set(value) = encryptedPrefs.edit().putString("relay_device_hash", value).apply()
+
+    /**
+     * Libellé lisible de ce device pour le relay (affiché dans GET /devices,
+     * utilisé par le LLM pour désambiguïser quand plusieurs devices sont
+     * connectés — voir plugin/hasan_delivery/tools.py::_resolve_device_id).
+     * Personnalisable dans Réglages ; sinon dérivé de Build.MANUFACTURER +
+     * Build.MODEL à la première lecture.
+     */
+    var relayDeviceLabel: String
+        get() {
+            val existing = encryptedPrefs.getString("relay_device_label", null)
+            if (existing != null) return existing
+            val generated = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+            encryptedPrefs.edit().putString("relay_device_label", generated).apply()
+            return generated
+        }
+        set(value) {
+            val trimmed = value.trim()
+            if (trimmed.isEmpty()) {
+                // Un libellé vidé retombe sur la valeur auto-générée plutôt que
+                // d'envoyer une chaîne vide au relay (voir écran Réglages).
+                encryptedPrefs.edit().remove("relay_device_label").apply()
+            } else {
+                encryptedPrefs.edit().putString("relay_device_label", trimmed).apply()
+            }
+        }
+
+    /**
+     * Token FCM courant transmis au relay (voir POST /fcm-token côté serveur,
+     * server/relay/pairing.py Session.fcm_token) — permet un réveil data-only
+     * de l'app quand elle n'a pas de WebSocket actif. null si FCM indisponible
+     * sur ce device (pas de Google Play Services) ou pas encore obtenu.
+     */
+    var relayFcmToken: String?
+        get() = encryptedPrefs.getString("relay_fcm_token", null)
+        set(value) = encryptedPrefs.edit().putString("relay_fcm_token", value).apply()
+
+    // ─────────────────────── hermes-webui (chat REST/SSE) ───────────────────────
+
+    /** URL de base hermes-webui (ex: "https://34.155.193.170"), distincte de [relayServerUrl] — voir com.hasan.v1.webui. */
+    var webUiServerUrl: String
+        get() = encryptedPrefs.getString("webui_server_url", "") ?: ""
+        set(value) = encryptedPrefs.edit().putString("webui_server_url", value).apply()
+
+    /**
+     * Cookie de session hermes_session obtenu via POST /api/auth/login. Pas de
+     * refresh token côté hermes-webui : le cookie expire côté serveur et un
+     * 401 déclenche un nouveau login (mot de passe re-demandé), voir
+     * com.hasan.v1.webui.WebUiAuthStore.
+     */
+    var webUiSessionCookie: String?
+        get() = encryptedPrefs.getString("webui_session_cookie", null)
+        set(value) = encryptedPrefs.edit().putString("webui_session_cookie", value).apply()
+
+    /**
+     * Cookie hermes_profile obtenu via POST /api/profile/switch — quel
+     * HERMES_HOME est actif (config/skills/workspace). Absent tant qu'aucun
+     * switch explicite n'a été fait (le serveur utilise alors son profil
+     * par défaut). Voir com.hasan.v1.webui.WebUiAuthStore.
+     */
+    var webUiProfileCookie: String?
+        get() = encryptedPrefs.getString("webui_profile_cookie", null)
+        set(value) = encryptedPrefs.edit().putString("webui_profile_cookie", value).apply()
+
+    /**
+     * Modèle LLM choisi par l'utilisateur pour le prochain tour de chat
+     * (picker dans la barre de composition) — vide = laisser le serveur
+     * utiliser son modèle par défaut.
+     */
+    var webUiSelectedModel: String
+        get() = prefs.getString("webui_selected_model", "") ?: ""
+        set(value) = prefs.edit().putString("webui_selected_model", value).apply()
 
     /** Hash MD5 du JSON des capabilities — détecte les changements à synchroniser. */
     var capabilitiesVersion: String

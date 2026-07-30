@@ -8,6 +8,16 @@ plugins {
     id("org.owasp.dependencycheck")
 }
 
+// Le plugin google-services exige google-services.json (secret propre à
+// chaque projet Firebase, gitignored — voir SETUP.md §4) : appliqué
+// seulement s'il est présent, pour qu'un fork/clone sans Firebase configuré
+// continue de builder (notifications proactives fonctionnent quand même via
+// WS + push buffer, juste sans réveil FCM app fermée — dégradation gracieuse
+// cohérente avec le comportement serveur, voir server/relay/server.py).
+if (rootProject.file("app/google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) load(f.inputStream())
@@ -72,6 +82,14 @@ dependencies {
     implementation(libs.compose.activity)
     debugImplementation(libs.compose.ui.tooling)
 
+    // Firebase Cloud Messaging — réveil data-only pour les notifications
+    // proactives quand l'app n'a pas de WebSocket actif (app fermée/Doze).
+    // Payload strictement data-only (jamais de texte, voir
+    // HasanFirebaseMessagingService) : Google ne voit qu'un signal de
+    // réveil opaque, jamais le contenu — voir docs/ARCHITECTURE.md.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging.ktx)
+
     // ONNX Runtime — utilisé par openwakeword pour l'inférence wake word
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
 
@@ -82,6 +100,13 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     kapt("androidx.room:room-compiler:2.6.1")
+
+    // Chiffrement de la base Room (finding #6 audit sécurité — historique de
+    // conversation en clair sur disque). SupportFactory branché dans
+    // HassanDatabase.getInstance(), migration du fichier plaintext existant
+    // au premier lancement post-update — voir HassanDatabase.kt.
+    implementation("net.zetetic:android-database-sqlcipher:4.5.4")
+    implementation("androidx.sqlite:sqlite:2.4.0")
 
     // EncryptedSharedPreferences
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
@@ -116,6 +141,9 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.5.3")
     implementation("androidx.camera:camera-view:1.5.3")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
+    // Authentification biométrique/PIN à l'activation du relay (actions téléphone sensibles).
+    implementation("androidx.biometric:biometric:1.1.0")
 
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

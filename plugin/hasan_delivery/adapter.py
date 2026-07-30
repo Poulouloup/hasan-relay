@@ -7,8 +7,14 @@ canal ne parle pas directement au protocole d'une plateforme tierce : il
 parle au relay server via HTTP, qui lui-même tient la connexion WebSocket
 avec le téléphone.
 
-Ce plugin ne gère qu'un seul device (un couple opérateur/téléphone), pas de
-multi-tenant : HASAN_RELAY_SESSION_TOKEN identifie le device déjà appairé.
+Ce canal de MESSAGERIE reste scopé à un seul device fixe par instance
+(HASAN_RELAY_SESSION_TOKEN identifie le device déjà appairé pour l'envoi/
+réception de messages proactifs) — mais ce module démarre AUSSI la boucle de
+veille multi-device (_run_device_watch_loop) qui tient à jour les tools
+function-calling de tools.py à travers TOUS les devices connectés (téléphone,
+Hasan Desktop…), via GET /devices/watch sur le relay (auth admin_token, pas
+session_token — voir tools.py pour le pourquoi). Deux capacités indépendantes
+du même plugin : la messagerie reste mono-device, les tools sont multi-device.
 Le pairing initial (génération du code, scan QR, /pairing/register) se fait
 hors de ce plugin, via l'app + le relay server directement (voir étape 5).
 
@@ -110,7 +116,7 @@ class HasanPhoneAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     supports_code_blocks = False
 
-    def __init__(self, config: PlatformConfig):
+    def __init__(self, config: PlatformConfig, ctx: Any = None):
         platform = Platform("hasan_delivery")
         super().__init__(config=config, platform=platform)
 
@@ -123,7 +129,13 @@ class HasanPhoneAdapter(BasePlatformAdapter):
         )
 
         self._poll_task: Optional[asyncio.Task] = None
+        self._device_watch_task: Optional[asyncio.Task] = None
         self._http_client: Optional["httpx.AsyncClient"] = None
+        # PluginContext — nécessaire pour sync_tools(ctx) dans
+        # _run_device_watch_loop. None hors du chargement normal du plugin
+        # (ex: instanciation directe dans un test), auquel cas la boucle de
+        # veille multi-device ne démarre simplement pas (voir connect()).
+        self._ctx = ctx
 
     # ── Connexion ────────────────────────────────────────────────────────
 
@@ -151,6 +163,8 @@ class HasanPhoneAdapter(BasePlatformAdapter):
 
         self._http_client = httpx.AsyncClient(timeout=None)
         self._poll_task = asyncio.create_task(self._run_long_poll_loop())
+        if self._ctx is not None:
+            self._device_watch_task = asyncio.create_task(self._run_device_watch_loop())
         self._mark_connected()
         logger.info("[%s] Connecté — long-poll sur %s/phone/replies", self.name, self._relay_url)
         return True
@@ -159,13 +173,15 @@ class HasanPhoneAdapter(BasePlatformAdapter):
         self._running = False
         self._mark_disconnected()
 
-        if self._poll_task:
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            self._poll_task = None
+        for task_attr in ("_poll_task", "_device_watch_task"):
+            task = getattr(self, task_attr)
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, task_attr, None)
 
         if self._http_client:
             await self._http_client.aclose()
@@ -235,6 +251,70 @@ class HasanPhoneAdapter(BasePlatformAdapter):
             await self._on_reply(reply)
 
         return bool(replies)
+
+    # ── Veille multi-device (tools.py) ──────────────────────────────────
+
+    async def _run_device_watch_loop(self) -> None:
+        """GET /devices/watch en boucle — sur signal de changement, appelle
+        tools.sync_tools(ctx) pour enregistrer les tools des capabilities
+        nouvellement apparues (nouveau device connecté, ou nouvelle
+        capability sur un device déjà connu). Mêmes idiomes de backoff/
+        erreurs que _run_long_poll_loop, réutilise le même self._http_client
+        — mais authentifié en admin_token (pas session_token), voir tools.py
+        pour le pourquoi (endpoint cross-device).
+
+        Un 401 ici arrête UNIQUEMENT cette boucle (log + return), pas tout
+        l'adapter — contrairement au 401 du long-poll de messagerie
+        (_poll_once) qui est fatal pour l'adapter entier : ce sont deux
+        capacités indépendantes du même plugin, un admin_token invalide ne
+        doit pas couper la messagerie qui fonctionne avec un token différent.
+        """
+        from .tools import sync_tools  # import tardif — évite un cycle adapter<->tools au chargement
+
+        admin_token = os.getenv("HASAN_RELAY_ADMIN_TOKEN", "").strip()
+        if not admin_token:
+            logger.warning(
+                "[%s] HASAN_RELAY_ADMIN_TOKEN absent — pas de veille multi-device",
+                self.name,
+            )
+            return
+
+        backoff_idx = 0
+        url = f"{self._relay_url}/devices/watch"
+
+        while self._running:
+            try:
+                response = await self._http_client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {admin_token}"},
+                    params={"timeout": int(LONG_POLL_TIMEOUT_SECONDS)},
+                    timeout=httpx.Timeout(
+                        connect=15.0,
+                        read=LONG_POLL_TIMEOUT_SECONDS + LONG_POLL_CLIENT_MARGIN_SECONDS,
+                        write=15.0,
+                        pool=15.0,
+                    ),
+                )
+                if response.status_code == 401:
+                    logger.error(
+                        "[%s] /devices/watch: admin_token rejeté (401) — arrêt de la veille "
+                        "multi-device. Vérifier HASAN_RELAY_ADMIN_TOKEN.",
+                        self.name,
+                    )
+                    return
+                response.raise_for_status()
+                backoff_idx = 0
+                if response.json().get("changed"):
+                    await sync_tools(self._ctx)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                if not self._running:
+                    return
+                logger.warning("[%s] Erreur veille multi-device: %s", self.name, exc)
+                delay = RECONNECT_BACKOFF[min(backoff_idx, len(RECONNECT_BACKOFF) - 1)]
+                await asyncio.sleep(delay)
+                backoff_idx += 1
 
     async def _on_reply(self, reply: Dict[str, Any]) -> None:
         text = (reply.get("text") or "").strip()
@@ -390,7 +470,7 @@ def register(ctx) -> None:
     ctx.register_platform(
         name="hasan_delivery",
         label="Hasan Phone",
-        adapter_factory=lambda cfg: HasanPhoneAdapter(cfg),
+        adapter_factory=lambda cfg: HasanPhoneAdapter(cfg, ctx=ctx),
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,

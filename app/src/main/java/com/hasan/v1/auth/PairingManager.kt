@@ -3,7 +3,9 @@ package com.hasan.v1.auth
 import android.util.Log
 import com.hasan.v1.SettingsManager
 import com.hasan.v1.network.RelayUrlDeriver
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -27,18 +29,42 @@ import javax.net.ssl.TrustManager
  *
  * Format attendu du contenu QR (généré côté admin/relay via
  * POST /pairing/create) :
- *   {"relay_url": "https://host:port", "code": "ABC123"}
+ *   {"relay_url": "https://host:port", "code": "ABC123",
+ *    "webui_url": "https://host:port", "webui_password": "..."}
+ * webui_url/webui_password sont optionnels — un QR généré sans hermes-webui
+ * configuré côté serveur (WEBUI_URL/WEBUI_PASSWORD absents sur
+ * hermes-relay.service) reste un QR bridge valide, juste sans configurer le
+ * chat hermes-webui. Voir [com.hasan.v1.webui.WebUiRestClient.login] pour
+ * l'échange effectif du mot de passe une fois ces champs extraits.
  */
 class PairingManager(private val settings: SettingsManager) {
 
     sealed class PairingResult {
-        data class Success(val relayUrl: String, val sessionToken: String) : PairingResult()
+        /** [webUiUrl]/[webUiPassword] présents seulement si le QR scanné les portait (voir [QrPairingPayload]). */
+        data class Success(
+            val relayUrl: String,
+            val sessionToken: String,
+            val webUiUrl: String? = null,
+            val webUiPassword: String? = null
+        ) : PairingResult()
         data class InvalidQrContent(val reason: String) : PairingResult()
-        /** Certificat inconnu ou changé — l'appelant doit présenter [certCheck] à l'utilisateur avant de retenter. */
+        /**
+         * Certificat inconnu ou changé — l'appelant doit présenter [certCheck] à
+         * l'utilisateur puis appeler [trustCertificate]. [sessionToken]/[refreshToken],
+         * si présents, sont ceux d'une réponse serveur DÉJÀ reçue avec succès pendant
+         * CE MÊME appel HTTP (le code de pairing, à usage unique, est consommé côté
+         * serveur dès la requête — indépendamment de la vérification TOFU côté client,
+         * qui se fait après coup sur la connexion déjà établie). Sans les conserver ici,
+         * il faudrait rappeler [pair] avec le même code après approbation du certificat,
+         * qui échouerait alors en "invalid_or_expired_code" (déjà consommé) — d'où leur
+         * capture dès ce premier appel plutôt qu'un retry réseau.
+         */
         data class CertificateCheckRequired(
             val certCheck: CertPinStore.CertCheckResult,
             val relayUrl: String,
-            val code: String
+            val code: String,
+            val sessionToken: String? = null,
+            val refreshToken: String? = null
         ) : PairingResult()
         data class ServerRejected(val httpCode: Int, val error: String?) : PairingResult()
         data class NetworkError(val message: String) : PairingResult()
@@ -55,7 +81,9 @@ class PairingManager(private val settings: SettingsManager) {
             val obj = JSONObject(rawText)
             val relayUrl = obj.optString("relay_url").takeIf { it.isNotBlank() } ?: return null
             val code = obj.optString("code").takeIf { it.isNotBlank() } ?: return null
-            QrPairingPayload(relayUrl = relayUrl, code = code)
+            val webUiUrl = obj.optString("webui_url").takeIf { it.isNotBlank() }
+            val webUiPassword = obj.optString("webui_password").takeIf { it.isNotBlank() }
+            QrPairingPayload(relayUrl = relayUrl, code = code, webUiUrl = webUiUrl, webUiPassword = webUiPassword)
         } catch (_: Exception) {
             null
         }
@@ -70,7 +98,13 @@ class PairingManager(private val settings: SettingsManager) {
         val payload = parseQrContent(rawText)
             ?: return PairingResult.InvalidQrContent("QR illisible ou champs relay_url/code manquants")
 
-        return pair(payload.relayUrl, payload.code)
+        // pair() ne connaît que (relayUrl, code) — réutilisable pour un pairing
+        // manuel sans QR — donc les champs webui optionnels du payload sont
+        // réinjectés ici après coup dans un Success, sans changer sa signature.
+        return when (val result = pair(payload.relayUrl, payload.code)) {
+            is PairingResult.Success -> result.copy(webUiUrl = payload.webUiUrl, webUiPassword = payload.webUiPassword)
+            else -> result
+        }
     }
 
     /**
@@ -107,7 +141,18 @@ class PairingManager(private val settings: SettingsManager) {
             if (certResult is CertPinStore.CertCheckResult.NewCertificate ||
                 certResult is CertPinStore.CertCheckResult.FingerprintMismatch
             ) {
-                return@withContext PairingResult.CertificateCheckRequired(certResult, httpBaseUrl, code)
+                // Le code (usage unique) est déjà consommé côté serveur à ce stade — si la
+                // réponse est par ailleurs un succès, on capture le token maintenant plutôt
+                // que de forcer l'appelant à retenter pair() avec ce même code après
+                // approbation du certificat (échouerait en invalid_or_expired_code).
+                val parsedForCert = if (response.isSuccessful) {
+                    responseBody?.let { runCatching { JSONObject(it) }.getOrNull() }
+                } else null
+                val tokenForCert = parsedForCert?.optString("session_token")?.takeIf { it.isNotBlank() }
+                val refreshForCert = parsedForCert?.optString("refresh_token")?.takeIf { it.isNotBlank() }
+                return@withContext PairingResult.CertificateCheckRequired(
+                    certResult, httpBaseUrl, code, tokenForCert, refreshForCert
+                )
             }
 
             if (!response.isSuccessful) {
@@ -131,6 +176,17 @@ class PairingManager(private val settings: SettingsManager) {
             settings.relayServerUrl = httpBaseUrl
             settings.relaySessionToken = sessionToken
             settings.relayRefreshToken = refreshToken
+            // Fire-and-forget : si un token FCM est déjà connu à ce stade (obtenu
+            // avant le pairing), on le pousse immédiatement plutôt que d'attendre
+            // une hypothétique reconnexion WS future — onNewToken()/le filet de
+            // sécurité de ConnectionManager.onOpen() couvrent les cas restants.
+            // Un échec ici ne doit jamais faire échouer le pairing lui-même.
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+                .addOnSuccessListener { fcmToken ->
+                    CoroutineScope(Dispatchers.IO).launch {
+                        com.hasan.v1.network.syncFcmTokenToRelay(settings, fcmToken)
+                    }
+                }
             Log.i(TAG, "Pairing réussi avec $httpBaseUrl")
             PairingResult.Success(httpBaseUrl, sessionToken)
         } catch (e: Exception) {
@@ -191,10 +247,34 @@ class PairingManager(private val settings: SettingsManager) {
         }
     }
 
-    /** Approuve le fingerprint reçu après un [PairingResult.CertificateCheckRequired], avant de rappeler [pair]. */
+    /** Approuve le fingerprint reçu après un [PairingResult.CertificateCheckRequired]. */
     fun trustCertificate(relayUrl: String, fingerprint: String) {
         val serverKey = CertPinStore.storageKeyFor("relay", RelayUrlDeriver.httpBaseUrl(relayUrl))
         certPinStore.trustCertificate(serverKey, fingerprint)
+    }
+
+    /**
+     * Termine un pairing après approbation du certificat TOFU. Si [pending] portait déjà
+     * un session_token (réponse serveur reçue avec succès pendant l'appel [pair] initial,
+     * voir [PairingResult.CertificateCheckRequired]), le persiste directement — aucun
+     * réseau nécessaire, et surtout aucun retry avec le code déjà consommé. Sinon (cas
+     * plus rare : le certificat était nouveau mais la requête avait par ailleurs échoué),
+     * retente [pair] normalement.
+     */
+    suspend fun completePairingAfterCertTrust(
+        pending: PairingResult.CertificateCheckRequired,
+        fingerprint: String
+    ): PairingResult {
+        trustCertificate(pending.relayUrl, fingerprint)
+        val sessionToken = pending.sessionToken
+        if (sessionToken != null) {
+            settings.relayServerUrl = pending.relayUrl
+            settings.relaySessionToken = sessionToken
+            settings.relayRefreshToken = pending.refreshToken
+            Log.i(TAG, "Pairing réussi avec ${pending.relayUrl} (certificat approuvé après coup)")
+            return PairingResult.Success(pending.relayUrl, sessionToken)
+        }
+        return pair(pending.relayUrl, pending.code)
     }
 
     private fun buildTofuHttpClient(trustManager: CertPinStore.TofuTrustManager): OkHttpClient {
@@ -204,6 +284,9 @@ class PairingManager(private val settings: SettingsManager) {
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustManager)
             .hostnameVerifier { _, _ -> true }
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .build()
     }
 
@@ -212,5 +295,10 @@ class PairingManager(private val settings: SettingsManager) {
     }
 }
 
-/** Contenu décodé d'un QR de pairing. */
-data class QrPairingPayload(val relayUrl: String, val code: String)
+/** Contenu décodé d'un QR de pairing. webUiUrl/webUiPassword absents si hermes-webui n'était pas configuré côté serveur au moment de la génération du QR. */
+data class QrPairingPayload(
+    val relayUrl: String,
+    val code: String,
+    val webUiUrl: String? = null,
+    val webUiPassword: String? = null
+)

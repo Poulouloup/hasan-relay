@@ -24,6 +24,10 @@ server/cert.pem
 server/key.pem
 server/gen_cert.py
 
+# Bridge Hasan — fichiers générés par install-bridge.sh (IP publique réelle
+# de l'opérateur, .env déjà couvert par la règle .env générique ci-dessous)
+server/Caddyfile
+
 # Scripts et données d'entraînement (locaux uniquement)
 training/
 
@@ -58,6 +62,9 @@ graphify-out/
 
 # Tests manuels (locaux)
 tests/
+# ...sauf les vrais tests automatisés pytest du plugin (pas des tests
+# manuels, doivent être versionnés et lancés en CI comme server/relay/).
+!plugin/hasan_delivery/tests/
 
 # Scripts dev (locaux)
 scripts/
@@ -65,3 +72,8 @@ scripts/
 
 # Fichiers de travail / notes de session (locaux, non trackés)
 archive/
+
+# Config Firebase (identifiants du projet Firebase de l'opérateur — à
+# régénérer par chaque déploiement/fork depuis sa propre console Firebase,
+# voir SETUP.md §4)
+app/google-services.json

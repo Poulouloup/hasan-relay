@@ -1,0 +1,40 @@
+# Déploiement Docker du bridge Hasan (relay + Caddy) — voir install-bridge.sh.
+# network_mode: host sur les deux services : pas de réseau bridge Docker, pas
+# de NAT, pas de règle firewall inter-conteneurs à gérer — le relay et Caddy
+# communiquent avec leurs pairs (hermes-webui, dashboard Hermes) sur
+# 127.0.0.1 exactement comme des process natifs. Même choix que le
+# docker-compose.yml officiel de hermes-agent (~/.hermes/hermes-agent/).
+name: hasan-bridge
+
+services:
+  relay:
+    build: ./relay
+    network_mode: host
+    env_file: .env
+    volumes:
+      # Sessions de pairing (device_hash, tokens) — DEFAULT_SESSIONS_PATH de
+      # pairing.py pointe vers ~/.hermes/... du process, qui est éphémère
+      # dans le conteneur sans ce volume : sans lui, tout pairing existant
+      # est perdu à chaque recréation du conteneur. RELAY_SESSIONS_PATH dans
+      # .env doit pointer vers /data/sessions.json (voir install-bridge.sh).
+      - relay_data:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Stocke la CA locale auto-signée (tls internal) — volume obligatoire,
+      # pas optionnel : sans lui, chaque recréation du conteneur régénère la
+      # CA et invalide le certificat déjà pinné en TOFU sur tous les
+      # téléphones appairés (CertPinStore.kt côté app), cassant silencieusement
+      # tous les pairings existants.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  relay_data:
+  caddy_data:
+  caddy_config:
