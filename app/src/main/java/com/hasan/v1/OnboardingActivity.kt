@@ -3,6 +3,7 @@ package com.hasan.v1
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -134,14 +135,14 @@ class OnboardingActivity : AppCompatActivity() {
         private lateinit var container: LinearLayout
         private var btnBattery: MaterialButton? = null
 
-        private val requestPermission = registerForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            view?.findViewById<TextView>(R.id.tvPageDescription)?.text =
-                if (granted) getString(R.string.onboarding_wakeword_granted)
-                else getString(R.string.onboarding_wakeword_denied)
-            if (granted) addBatteryButtonIfNeeded()
-        }
+        // Groupe les 2 permissions runtime bloquantes du premier lancement (wake word +
+        // notifications) en une seule demande — évite qu'elles soient découvertes plus tard,
+        // dispersées à divers points du flux (MainActivity.requestNotifPermissionIfNeeded()
+        // reste en place comme filet de sécurité si l'utilisateur les refuse ici ou saute
+        // l'onboarding).
+        private val requestPermissions = registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { results -> applyPermissionResults(results) }
 
         // Pas de callback fiable pour ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (l'utilisateur
         // peut annuler sans résultat exploitable) — on relit l'état système au retour sur la page.
@@ -163,11 +164,15 @@ class OnboardingActivity : AppCompatActivity() {
             container = view.findViewById(R.id.actionContainer)
             val ctx = requireContext()
 
-            val alreadyGranted = ContextCompat.checkSelfPermission(
+            val audioGranted = ContextCompat.checkSelfPermission(
                 ctx, Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
+            val notifGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    ctx, Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
 
-            if (alreadyGranted) {
+            if (audioGranted && notifGranted) {
                 view.findViewById<TextView>(R.id.tvPageDescription).text =
                     getString(R.string.onboarding_wakeword_granted)
                 addBatteryButtonIfNeeded()
@@ -185,8 +190,42 @@ class OnboardingActivity : AppCompatActivity() {
             container.addView(btnActivate)
 
             btnActivate.setOnClickListener {
-                requestPermission.launch(Manifest.permission.RECORD_AUDIO)
+                val permissions = buildList {
+                    if (!audioGranted) add(Manifest.permission.RECORD_AUDIO)
+                    if (!notifGranted) add(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                requestPermissions.launch(permissions.toTypedArray())
             }
+        }
+
+        /** Combine le résultat des 2 permissions en un message unique — dégradation gracieuse :
+         * un refus n'empêche jamais de continuer l'onboarding, seules les features concernées
+         * (wake word et/ou notifications) resteront désactivées jusqu'à réactivation manuelle
+         * dans Réglages. */
+        private fun applyPermissionResults(results: Map<String, Boolean>) {
+            val ctx = requireContext()
+            val audioGranted = results[Manifest.permission.RECORD_AUDIO]
+                ?: (ContextCompat.checkSelfPermission(
+                    ctx, Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED)
+            val notifGranted = results[Manifest.permission.POST_NOTIFICATIONS]
+                ?: (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    ContextCompat.checkSelfPermission(
+                        ctx, Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED)
+
+            view?.findViewById<TextView>(R.id.tvPageDescription)?.text = buildString {
+                append(
+                    if (audioGranted) getString(R.string.onboarding_wakeword_granted)
+                    else getString(R.string.onboarding_wakeword_denied)
+                )
+                appendLine()
+                append(
+                    if (notifGranted) getString(R.string.onboarding_notif_granted)
+                    else getString(R.string.onboarding_notif_denied)
+                )
+            }
+            if (audioGranted) addBatteryButtonIfNeeded()
         }
 
         /** Ajoute (une seule fois) le bouton d'exemption batterie, seulement s'il est encore utile. */
@@ -258,9 +297,14 @@ class OnboardingActivity : AppCompatActivity() {
             val hasAudio = ContextCompat.checkSelfPermission(
                 ctx, Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
+            val hasNotif = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    ctx, Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
 
             val summary = buildString {
                 appendLine(if (hasAudio) "Wake word : activé" else "Wake word : désactivé")
+                appendLine(if (hasNotif) "Notifications : activées" else "Notifications : désactivées")
                 append("TTS : activé")
             }
             view.findViewById<TextView>(R.id.tvPageDescription).text = summary

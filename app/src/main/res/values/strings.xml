@@ -117,10 +117,12 @@
     <string name="onboarding_welcome_subtitle">Votre assistant vocal personnel</string>
     <string name="onboarding_welcome_desc">Hasan se connecte à Hermes Agent pour répondre à vos questions, contrôler votre musique et bien plus encore.</string>
     <string name="onboarding_wakeword_title">Activez Ok Hasan</string>
-    <string name="onboarding_wakeword_desc">Dites \'Ok Hasan\' pour activer l\'assistant à tout moment, même quand l\'app est en arrière-plan.</string>
-    <string name="onboarding_wakeword_activate">Activer le wake word</string>
+    <string name="onboarding_wakeword_desc">Dites \'Ok Hasan\' pour activer l\'assistant à tout moment, même quand l\'app est en arrière-plan. Hasan a aussi besoin de vous notifier (réponses, rappels proactifs).</string>
+    <string name="onboarding_wakeword_activate">Activer le micro et les notifications</string>
     <string name="onboarding_wakeword_granted">Wake word activé</string>
     <string name="onboarding_wakeword_denied">Permission refusée — activez le micro dans les paramètres système</string>
+    <string name="onboarding_notif_granted">Notifications activées</string>
+    <string name="onboarding_notif_denied">Notifications refusées — réactivables dans Réglages</string>
     <string name="onboarding_battery_activate">Autoriser l\'écoute en arrière-plan</string>
     <string name="onboarding_battery_granted">Écoute en arrière-plan autorisée</string>
     <string name="onboarding_battery_note">Sans cette autorisation, certains téléphones (Xiaomi, Huawei, Samsung, OnePlus…) coupent le wake word en arrière-plan au bout de quelques minutes.</string>
