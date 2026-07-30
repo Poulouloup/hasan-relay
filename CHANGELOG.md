@@ -111,6 +111,16 @@ montre déjà le quoi).
   note statique Huawei sans action réelle par un vrai bouton (`ACTION_
   REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) fonctionnant sur tous les OEM,
   avec statut visible dans Réglages → Wake Word.
+- Onboarding : la permission notifications (`POST_NOTIFICATIONS`) est
+  désormais demandée en même temps que le micro (une seule invite groupée,
+  `ActivityResultContracts.RequestMultiplePermissions`) plutôt que
+  découverte plus tard dans le flux — `MainActivity` garde un filet de
+  sécurité si l'une des deux est refusée à l'onboarding ou si celui-ci est
+  sauté. Drawer : âge relatif affiché à droite de chaque session
+  (`TimeFormat.formatRelativeSessionAge`, paliers "-1h"/"+3d"/"+2w"/"+5m"/"+1y")
+  pour distinguer les sessions actives des anciennes sans ouvrir chacune ;
+  nouveau logo (`hasan_logo_halo.png`) dans le header à la place du glyphe
+  vectoriel `ic_hasan_brand_glyph`.
 
 ### Removed
 - `plugin/tools/android_tool.py` — code mort confirmé : n'a jamais été
