@@ -157,7 +157,8 @@ class ConversationFragment : Fragment(), SpeechRecognizerManager.SttListener {
                     HasanHeader(
                         hermesState = hermesBadgeState.value,
                         bridgeState = bridgeBadgeState.value,
-                        onMenuClick = { (activity as? MainActivity)?.openDrawer() }
+                        onMenuClick = { (activity as? MainActivity)?.openDrawer() },
+                        onFilesClick = { (activity as? MainActivity)?.openFiles() }
                     )
                     Box(
                         modifier = Modifier
@@ -191,8 +192,7 @@ class ConversationFragment : Fragment(), SpeechRecognizerManager.SttListener {
                         onModelSelected = { modelId -> viewModel.selectModel(modelId) },
                         onCancelChat = { viewModel.cancelActiveChat() },
                         onAttachClick = { attachmentPickerLauncher.launch(arrayOf("*/*")) },
-                        onRemoveAttachment = { att -> viewModel.removePendingAttachment(att) },
-                        onFilesClick = { (activity as? MainActivity)?.openFiles() }
+                        onRemoveAttachment = { att -> viewModel.removePendingAttachment(att) }
                     )
                 }
             }
@@ -346,18 +346,22 @@ class ConversationFragment : Fragment(), SpeechRecognizerManager.SttListener {
     }
 
     private fun updateConnectionBadges(state: UiState) {
+        // Label seul ("Hermes"/"Bridge", mockup ligne 756-757) — pas de suffixe "· CONNECTÉ"
+        // texte : l'état est déjà porté par la couleur du point (vert/gris, voir
+        // HasanHeader.ConnectionBadge) + son contentDescription pour l'accessibilité. Les états
+        // transitoires (connexion/reconnexion) restent affichés car ils portent une info que la
+        // couleur seule (vert/gris binaire) ne peut pas distinguer.
         val hermesConnected = state.serverConnected && state.webUiLoggedIn
         hermesBadgeState.value = ConnectionBadgeState(
             connected = hermesConnected,
-            readout = if (hermesConnected) "HERMES · CONNECTÉ" else "HERMES · DÉCONNECTÉ"
+            readout = "HERMES"
         )
 
         val bridgeConnected = state.relayConnectionStatus == RelayConnectionStatus.CONNECTED
         val bridgeReadout = when (state.relayConnectionStatus) {
-            RelayConnectionStatus.CONNECTED     -> "BRIDGE · CONNECTÉ"
+            RelayConnectionStatus.CONNECTED, RelayConnectionStatus.DISCONNECTED -> "BRIDGE"
             RelayConnectionStatus.CONNECTING    -> "BRIDGE · CONNEXION…"
             RelayConnectionStatus.RECONNECTING  -> "BRIDGE · RECONNEXION…"
-            RelayConnectionStatus.DISCONNECTED  -> "BRIDGE · DÉCONNECTÉ"
         }
         bridgeBadgeState.value = ConnectionBadgeState(connected = bridgeConnected, readout = bridgeReadout)
     }

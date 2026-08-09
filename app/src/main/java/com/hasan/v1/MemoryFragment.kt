@@ -89,7 +89,8 @@ class MemoryFragment : Fragment() {
                                     onSkillClick = { skill -> skillsViewModel.openDetail(skill) },
                                     onDismissError = { skillsViewModel.clearError() }
                                 ),
-                                showMenuHeader = false
+                                showMenuHeader = false,
+                                showRefresh = false
                             )
                         }
                     }
