@@ -12,9 +12,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -23,10 +28,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hasan.v1.R
@@ -53,34 +60,75 @@ data class ConnectionBadgeState(
 
 /** Header — hamburger (ouvre le drawer), logo à coin diagonal, wordmark HASAN, badges de
  * connexion (hermes-webui + relay bridge) avec point pulsant. Voir .header dans hasan-mockup-v2.html. */
+/**
+ * [onFilesClick] : bouton "Fichiers" du header, quand non-null — dans le mockup
+ * (update/hasan-rework-mockup.html ligne 751-758) il vit entre le titre "Hasan" et
+ * les conn-pills, PAS en overlay flottant par-dessus le contenu (ancien
+ * comportement de ChatScreen.kt avant le rework fidèle au mockup). Null sur les
+ * écrans qui n'ont pas d'action fichiers associée (aucun aujourd'hui — HasanHeader
+ * n'est utilisé que par le Chat — mais gardé optionnel par cohérence avec
+ * HasanMinimalHeader qui accepte déjà un title optionnel).
+ */
 @Composable
 fun HasanHeader(
     hermesState: ConnectionBadgeState,
     bridgeState: ConnectionBadgeState,
     onMenuClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onFilesClick: (() -> Unit)? = null
 ) {
+    // Fond BgHeader — status bar système gardée visible (pas masquée, voir
+    // MainActivity.onCreate()). Le padding d'insets status bar N'EST PAS appliqué ici :
+    // ce composable vit dans un ComposeView imbriqué (Compose racine → AndroidView →
+    // Fragment → ComposeView, voir ConversationFragment.setupComposeChat()) où
+    // WindowInsets.statusBars ne se propage pas de façon fiable à travers plusieurs
+    // frontières de vues. Le padding est appliqué UNE FOIS au niveau du ComposeView
+    // racine (MainActivity.setupDrawerRoot()) à la place — voir HasanStatusBarSpacer.
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = HasanDimens.SpacingXl, vertical = HasanDimens.SpacingM),
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .background(HasanColors.BgHeader)
+            // border-bottom du mockup (.app-header, ligne 260 : 1px solid border-subtle) —
+            // sépare visuellement le header du contenu, absent avant cette correction (bug
+            // repéré sur plusieurs onglets, pas seulement Chat).
+            .drawBehind {
+                drawLine(
+                    color = HasanColors.Border,
+                    start = androidx.compose.ui.geometry.Offset(0f, size.height),
+                    end = androidx.compose.ui.geometry.Offset(size.width, size.height),
+                    strokeWidth = HasanDimens.BorderWidth.toPx()
+                )
+            }
+            // vertical = SpacingM/4 (3dp, pas 12dp) : l'espace vide entre le bas de la status
+            // bar système et le haut de ce header était encore jugé trop grand après un premier
+            // resserrement à 6dp — les insets système réservent déjà l'espace du punch-hole, ce
+            // padding ne doit qu'aérer le header lui-même, pas ajouter de marge visible.
+            .padding(horizontal = HasanDimens.SpacingXl, vertical = HasanDimens.SpacingM / 4),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)) {
+        HasanIconButton(
+            iconRes = R.drawable.ic_menu_hamburger,
+            contentDescription = "Menu",
+            onClick = onMenuClick
+        )
+        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+        BrandMark()
+        // "Hasan" en casse mixte (mockup ligne 753 : <h1>Hasan</h1>), PAS "HASAN"
+        // tout capitales — le tout-capitales espacé est réservé au wordmark du
+        // drawer (DrawerHeader), un contexte différent dans le mockup.
+        Text(
+            text = "Hasan",
+            color = HasanColors.TextPrimary,
+            fontFamily = ChakraPetch,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            fontSize = 18.sp,
+            modifier = Modifier.weight(1f).padding(start = HasanDimens.SpacingS)
+        )
+        if (onFilesClick != null) {
             HasanIconButton(
-                iconRes = R.drawable.ic_menu_hamburger,
-                contentDescription = "Menu",
-                onClick = onMenuClick
-            )
-            BrandMark()
-            Text(
-                text = "HASAN",
-                color = HasanColors.TextPrimary,
-                fontFamily = ChakraPetch,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                fontSize = HasanDimens.TextDisplaySmall,
-                letterSpacing = 2.sp
+                iconRes = R.drawable.ic_folder,
+                contentDescription = "Fichiers",
+                onClick = onFilesClick
             )
         }
         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(HasanDimens.SpacingXxs)) {
@@ -138,20 +186,30 @@ fun ScreenTitle(text: String, modifier: Modifier = Modifier) {
     )
 }
 
+/**
+ * logo-badge du mockup (ligne 661-671, .cut-sm = notch 6px) — cadre coin-coupé
+ * fixe (PAS la forme diagonale asymétrique utilisée avant), cadre = Border
+ * (gris, PAS l'accent rouge), remplissage = fond sombre + logo. La forme
+ * arrondie visible sur la capture vient du PNG logo lui-même (cercle dessiné
+ * dans l'asset), pas d'un clip Compose supplémentaire.
+ */
 @Composable
-private fun BrandMark() {
+fun BrandMark(size: Dp = 32.dp) {
     Box(
         modifier = Modifier
-            .size(30.dp)
-            .clip(HasanShapes.diagonal)
-            .background(HasanColors.Accent),
+            .size(size)
+            .clip(HasanShapes.panelSmall())
+            .background(HasanColors.Border)
+            .padding(1.dp)
+            .clip(HasanShapes.panelSmall())
+            .background(Color(0xFF0A0A0C)),
         contentAlignment = Alignment.Center
     ) {
         Image(
-            painter = painterResource(R.drawable.hasan_logo_halo),
+            painter = painterResource(R.drawable.hasan_logo_transparent),
             contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.size(34.dp)
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(0.92f)
         )
     }
 }
@@ -168,7 +226,10 @@ private fun ConnectionBadge(state: ConnectionBadgeState) {
         ),
         label = "conn-dot-alpha"
     )
-    val dotColor = if (state.connected) HasanColors.Accent else HasanColors.TextMutedA11y
+    // Point vert (Success) quand connecté — mockup ligne 275 (.dot { background: var(--success) }),
+    // PAS l'accent rouge de marque : le rouge est réservé aux commandes/actions, le vert aux
+    // statuts positifs (cohérent avec la distinction sémantique du mockup, section 1 du brief).
+    val dotColor = if (state.connected) HasanColors.Success else HasanColors.TextMutedA11y
 
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         androidx.compose.foundation.layout.Box(

@@ -10,7 +10,16 @@ import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.collectAsState
@@ -69,6 +78,15 @@ class MainActivity : AppCompatActivity() {
     /** Piloté depuis confirmQuit() — affiche HasanConfirmOverlay par-dessus tout l'écran. */
     private var showQuitConfirm by mutableStateOf(false)
 
+    /**
+     * Vrai quand le mode mains libres occupe le conteneur de fragments. Doublonne
+     * volontairement [lightModeFragment] : ce dernier est un champ ordinaire, que Compose
+     * n'observe pas — il ne déclencherait donc aucune recomposition en entrant/sortant du
+     * mode. Sert à ne PAS teindre la bande de status bar en couleur de header sur cet
+     * écran, le seul à n'avoir aucun header (fond BgBase plein cadre).
+     */
+    private var isLightModeActive by mutableStateOf(false)
+
     private val requestNotifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { /* granted or not — service démarré dans onCreate de toute façon */ }
@@ -98,16 +116,19 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // targetSdk 35 force l'edge-to-edge par défaut (Android 15+) : le
-        // contenu Compose est dessiné SOUS la status bar système, qui reste
-        // au-dessus en z-order et absorbe les taps destinés au header
-        // applicatif (bouton Menu notamment) sans que l'app ne gère les
-        // WindowInsets pour repositionner son contenu. Plutôt que de
-        // cantonner le contenu sous la status bar, on la masque
-        // complètement (mode immersif) tant que l'app est au premier plan —
-        // cohérent avec l'absence d'UI système utile ici (pas de barre de
-        // notifications à surveiller pendant l'usage de l'app).
-        hideSystemBars()
+        // Status bar système gardée visible (fidèle au mockup update/hasan-rework-mockup.html,
+        // qui simule une vraie status bar avec heure/icônes système + un bandeau applicatif de
+        // même couleur en dessous — voir --statusbar-h et le commentaire sur .device-statusbar).
+        // Le bug précédemment corrigé ici (status bar edge-to-edge interceptant les taps du
+        // bouton Menu, targetSdk 35) était dû à l'absence de gestion des WindowInsets, pas à la
+        // visibilité de la status bar elle-même : chaque écran applique maintenant
+        // Modifier.statusBarsPadding() (HasanHeader/HasanMinimalHeader) pour ne jamais dessiner
+        // de contenu interactif sous la status bar, au lieu de la masquer entièrement.
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Icônes système claires (fond BgHeader sombre derrière la status bar) — cohérent
+        // avec le thème sombre unique de l'app (HasanTheme n'a pas de variante claire).
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            .isAppearanceLightStatusBars = false
 
         // Redirige vers l'onboarding au premier lancement
         if (!viewModel.settings.onboardingCompleted) {
@@ -147,7 +168,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        hideSystemBars()
     }
 
     /**
@@ -163,24 +183,6 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        // Le mode immersif "sticky" se désactive automatiquement quand une
-        // fenêtre système (dialog de permission, sélecteur, clavier...)
-        // reprend le focus — on le réapplique dès qu'on le regagne, sinon
-        // la status bar reste visible en permanence après la première
-        // interaction système (RECORD_AUDIO, notifications, etc.).
-        if (hasFocus) hideSystemBars()
-    }
-
-    /** Masque la status bar (mode immersif sticky) — voir le commentaire dans onCreate(). */
-    private fun hideSystemBars() {
-        val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
-        controller.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
-        controller.systemBarsBehavior =
-            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
     private fun requestNotifPermissionIfNeeded() {
@@ -260,8 +262,52 @@ class MainActivity : AppCompatActivity() {
                         callbacks = buildDrawerCallbacks(scope) { scope.launch { drawerState.close() } },
                         drawerState = drawerState
                     ) {
+                        // windowInsetsPadding appliqué ICI (ComposeView racine, niveau 1) et
+                        // PAS dans HasanHeader/HasanMinimalHeader (qui vivent 2 ComposeView plus
+                        // bas, à travers AndroidView → Fragment → ComposeView) — WindowInsets
+                        // Compose ne s'est pas propagé de façon fiable jusque-là (bouton Menu +
+                        // titre superposés à la vraie status bar système sur device, observé sur
+                        // capture). Le padding réservé ici pousse tout le contenu du fragment
+                        // (dont son propre header interne, déjà sans padding insets) sous la
+                        // status bar en un seul point de vérité.
+                        // Bande de status bar (zone du poinçon caméra) peinte en couleur de
+                        // header : sans elle, le padding d'insets ci-dessous laissait voir le
+                        // fond BgBase au-dessus du header, qui semblait alors "flotter" au
+                        // lieu de remonter jusqu'en haut de l'écran comme dans le mockup.
+                        // Peinte ici, au même niveau racine que le padding qui la crée —
+                        // et non dans HasanHeader/HasanMinimalHeader, qui vivent 2 ComposeView
+                        // plus bas (AndroidView → Fragment → ComposeView) où les WindowInsets
+                        // ne se propagent pas de façon fiable (voir le commentaire du padding).
+                        //
+                        // Exclut le mode mains libres, seul écran sans header : sa zone haute
+                        // doit rester en BgBase comme le reste de son fond plein cadre.
+                        if (!isLightModeActive) {
+                            androidx.compose.foundation.layout.Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .windowInsetsTopHeight(WindowInsets.statusBars)
+                                    .background(com.hasan.v1.ui.theme.HasanColors.BgHeader)
+                            )
+                        }
                         AndroidView(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                // navigationBars en plus de statusBars : la barre gestuelle système
+                                // (home indicator) était collée directement sous le composer sans
+                                // marge, observé sur capture device — même raisonnement que pour
+                                // status bar, appliqué ici au niveau racine.
+                                // ime : réserve l'espace du clavier virtuel — imePadding() posé
+                                // directement dans ChatScreen.kt (2 ComposeView plus bas, à travers
+                                // AndroidView → Fragment → ComposeView) ne recevait pas l'inset
+                                // clavier (composer resté caché sous le clavier). Appliqué ici, au
+                                // niveau racine : le AndroidView entier (header + fil de messages +
+                                // composer) se comprime vers le haut quand le clavier apparaît — le
+                                // header, déjà en haut et de taille fixe, ne "descend" donc jamais
+                                // visuellement, seul l'espace sous lui se réduit et le composer
+                                // remonte au-dessus du clavier. Comportement confirmé sur device
+                                // (windowSoftInputMode="adjustNothing" dans AndroidManifest.xml —
+                                // seul Compose gère l'IME, pas de double compensation système).
+                                .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.navigationBars).union(WindowInsets.ime)),
                             factory = { ctx ->
                                 LayoutInflater.from(ctx).inflate(R.layout.content_fragment_container, null).also {
                                     fragmentContainerRoot = it
@@ -287,10 +333,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildDrawerState(sessions: List<HermesSession>): DrawerUiState {
-        val items = sessions.mapIndexed { index, session ->
+        // Pas de numérotation "01./02." — mockup ligne 1464 : juste le nom de session, un
+        // point (sdot) avant le nom si active, l'âge relatif à droite (voir DrawerSessionRow).
+        val items = sessions.map { session ->
             DrawerSessionItem(
                 id = session.id,
-                label = "${(index + 1).toString().padStart(2, '0')}. ${session.name}",
+                label = session.name,
                 isActive = session.isActive,
                 lastMessageAt = session.updatedAt
             )
@@ -420,6 +468,7 @@ class MainActivity : AppCompatActivity() {
     fun enterLightMode() {
         val fragment = LightModeFragment()
         lightModeFragment = fragment
+        isLightModeActive = true
         supportFragmentManager.beginTransaction()
             .add(R.id.fragmentContainer, fragment, TAG_LIGHT)
             .hide(chatFragment)
@@ -439,6 +488,7 @@ class MainActivity : AppCompatActivity() {
                 .commit()
             lightModeFragment = null
         }
+        isLightModeActive = false
         selectedNavTab = HasanNavTab.CHAT
     }
 

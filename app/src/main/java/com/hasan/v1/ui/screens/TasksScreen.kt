@@ -1,6 +1,7 @@
 package com.hasan.v1.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,21 +19,23 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hasan.v1.webui.models.CronJob
-import com.hasan.v1.ui.components.AccentIconButton
 import com.hasan.v1.ui.components.CutCornerPanel
+import com.hasan.v1.ui.components.HasanIconButton
 import com.hasan.v1.ui.components.HasanMinimalHeader
 import com.hasan.v1.ui.components.HasanToggle
-import com.hasan.v1.ui.components.TagPill
 import com.hasan.v1.ui.theme.ChakraPetch
 import com.hasan.v1.ui.theme.HasanColors
 import com.hasan.v1.ui.theme.HasanDimens
 import com.hasan.v1.ui.theme.HasanShapes
 import com.hasan.v1.ui.theme.IBMPlexMono
+import com.hasan.v1.ui.theme.IBMPlexSans
 
 /** État affiché par l'écran Tasks — reflète TasksViewModel.uiState. */
 data class TasksScreenUiState(
@@ -58,7 +62,7 @@ class TasksCallbacks(
 fun TasksScreen(state: TasksScreenUiState, callbacks: TasksCallbacks) {
     Column(modifier = Modifier.fillMaxSize()) {
         HasanMinimalHeader(callbacks.onMenuClick, title = "Tâches")
-        TasksHeader(jobCount = state.jobs.size, onRefresh = callbacks.onRefresh, onNewTask = callbacks.onNewTask)
+        TasksHeader(jobCount = state.jobs.size, loading = state.loading, onRefresh = callbacks.onRefresh, onNewTask = callbacks.onNewTask)
 
         state.errorMessage?.let { message ->
             TasksErrorBanner(message = message, onDismiss = callbacks.onDismissError)
@@ -101,7 +105,7 @@ fun TasksScreen(state: TasksScreenUiState, callbacks: TasksCallbacks) {
 }
 
 @Composable
-private fun TasksHeader(jobCount: Int, onRefresh: () -> Unit, onNewTask: () -> Unit) {
+private fun TasksHeader(jobCount: Int, loading: Boolean, onRefresh: () -> Unit, onNewTask: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(HasanDimens.SpacingL),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -122,13 +126,15 @@ private fun TasksHeader(jobCount: Int, onRefresh: () -> Unit, onNewTask: () -> U
                 fontSize = HasanDimens.TextCaption
             )
         }
+        // .icon-btn du mockup (ligne 777-780) — transparent, pas de fond/bordure coloré
+        // (AccentIconButton avait un fond AccentGlowBg + bordure AccentDim, absents ici).
         Row(horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)) {
-            AccentIconButton(onClick = onRefresh, modifier = Modifier.size(HasanDimens.TouchTarget)) {
-                Text(text = "↻", color = HasanColors.Accent, fontSize = HasanDimens.TextHeading)
-            }
-            AccentIconButton(onClick = onNewTask, modifier = Modifier.size(HasanDimens.TouchTarget)) {
-                Text(text = "+", color = HasanColors.Accent, fontSize = HasanDimens.TextTitleMedium)
-            }
+            com.hasan.v1.ui.components.RefreshIconButton(loading = loading, onClick = onRefresh)
+            com.hasan.v1.ui.components.HasanIconButton(
+                iconRes = com.hasan.v1.R.drawable.ic_plus,
+                contentDescription = "Créer une tâche",
+                onClick = onNewTask
+            )
         }
     }
 }
@@ -186,13 +192,22 @@ private fun TaskCard(job: CronJob, running: Boolean, callbacks: TasksCallbacks) 
                 TaskStatusPill(job = job, running = running)
             }
 
-            Text(
-                text = job.scheduleDisplay,
-                color = HasanColors.TextMutedA11y,
-                fontFamily = IBMPlexMono,
-                fontSize = HasanDimens.TextCaption,
-                modifier = Modifier.padding(top = HasanDimens.SpacingXs)
-            )
+            // .mono-chip du mockup (ligne 313-316, utilisé ligne 1399 pour l'expression cron)
+            // — fond bg-surface-2, bordure border-subtle, texte accent-strong mono 12px.
+            Box(
+                modifier = Modifier
+                    .padding(top = HasanDimens.SpacingS)
+                    .background(HasanColors.BgSurface2)
+                    .border(HasanDimens.BorderWidth, HasanColors.Border)
+                    .padding(horizontal = 9.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = job.scheduleDisplay,
+                    color = HasanColors.AccentStrong,
+                    fontFamily = IBMPlexMono,
+                    fontSize = 12.sp
+                )
+            }
 
             job.lastError?.let { error ->
                 Text(
@@ -203,54 +218,72 @@ private fun TaskCard(job: CronJob, running: Boolean, callbacks: TasksCallbacks) 
                 )
             }
 
+            // .switch-row du mockup (ligne 1401) — label "Actif" directement à gauche du
+            // switch (pas de weight/espace vide entre les deux), bouton play séparé à droite.
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = HasanDimens.SpacingM),
-                horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                HasanToggle(checked = job.enabled, onCheckedChange = { callbacks.onToggleEnabled(job) })
-                Text(
-                    text = if (job.enabled) "Actif" else "En pause",
-                    color = HasanColors.TextSecondary,
-                    fontSize = HasanDimens.TextCaption,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f)
-                )
-                AccentIconButton(
-                    onClick = { callbacks.onRunNow(job) },
-                    modifier = Modifier.size(HasanDimens.IconLarge)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)) {
+                    Text(text = "Actif", color = HasanColors.TextPrimary, fontFamily = IBMPlexSans, fontSize = 14.5.sp)
+                    HasanToggle(checked = job.enabled, onCheckedChange = { callbacks.onToggleEnabled(job) })
+                }
+                // .icon-btn.cut-sm du mockup (ligne 1402) — fond accent-deep plein, icône
+                // blanche, pas transparent comme AccentIconButton (fond translucide + bordure).
+                Box(
+                    modifier = Modifier
+                        .size(HasanDimens.TouchTarget)
+                        .clip(HasanShapes.panelSmall())
+                        .background(HasanColors.Accent)
+                        .clickable(onClick = { callbacks.onRunNow(job) }),
+                    contentAlignment = Alignment.Center
                 ) {
                     if (running) {
-                        CircularProgressIndicator(color = HasanColors.Accent, strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
+                        CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
                     } else {
-                        Text(text = "▶", color = HasanColors.Accent, fontSize = HasanDimens.TextSubtitle)
+                        androidx.compose.foundation.Image(
+                            painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_play),
+                            contentDescription = "Exécuter maintenant",
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
 
+            // border-top du mockup (ligne 1404) — séparateur au-dessus de la rangée d'actions,
+            // absent avant cette correction.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = HasanDimens.SpacingM)
+                    .height(HasanDimens.BorderWidth)
+                    .background(HasanColors.Border)
+            )
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = HasanDimens.SpacingS),
+                modifier = Modifier.fillMaxWidth().padding(top = HasanDimens.SpacingXs),
                 horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingL)
             ) {
                 Text(
                     text = "Historique",
-                    color = HasanColors.TextMutedA11y,
-                    fontFamily = IBMPlexMono,
-                    fontSize = HasanDimens.TextLabelMedium,
+                    color = HasanColors.TextSecondary,
+                    fontFamily = IBMPlexSans,
+                    fontSize = 13.5.sp,
                     modifier = Modifier.clickableTextPadding { callbacks.onShowHistory(job) }
                 )
                 Text(
                     text = "Modifier",
-                    color = HasanColors.TextMutedA11y,
-                    fontFamily = IBMPlexMono,
-                    fontSize = HasanDimens.TextLabelMedium,
+                    color = HasanColors.TextSecondary,
+                    fontFamily = IBMPlexSans,
+                    fontSize = 13.5.sp,
                     modifier = Modifier.clickableTextPadding { callbacks.onEditTask(job) }
                 )
                 Text(
                     text = "Supprimer",
-                    color = HasanColors.Accent,
-                    fontFamily = IBMPlexMono,
-                    fontSize = HasanDimens.TextLabelMedium,
+                    color = HasanColors.AccentStrong,
+                    fontFamily = IBMPlexSans,
+                    fontSize = 13.5.sp,
                     modifier = Modifier.clickableTextPadding { callbacks.onDeleteTask(job) }
                 )
             }
@@ -258,15 +291,29 @@ private fun TaskCard(job: CronJob, running: Boolean, callbacks: TasksCallbacks) 
     }
 }
 
+// .badge/.badge-success du mockup (ligne 377-378, 1397) — rectangle net avec bordure
+// teintée, pas TagPill (coins arrondis, sans bordure) : écart visuel avec le mockup
+// sur ce composant partagé, corrigé localement ici plutôt que globalement (TagPill
+// reste utilisé ailleurs — Kanban/Tools/Skills — hors périmètre de cette passe).
+private data class StatusPillStyle(val label: String, val bg: Color, val fg: Color, val borderTinted: Boolean)
+
 @Composable
 private fun TaskStatusPill(job: CronJob, running: Boolean) {
-    val (label, bg, fg) = when {
-        running -> Triple("EN COURS", HasanColors.AccentDim, HasanColors.Accent)
-        !job.enabled -> Triple("PAUSE", HasanColors.BgSurface3, HasanColors.TextMutedA11y)
-        job.lastStatus == "error" -> Triple("ERREUR", HasanColors.AccentDim, HasanColors.Accent)
-        else -> Triple("ACTIF", HasanColors.BgSurface3, HasanColors.TextSecondary)
+    val style = when {
+        running -> StatusPillStyle("EN COURS", HasanColors.AccentDim, HasanColors.Accent, borderTinted = true)
+        !job.enabled -> StatusPillStyle("PAUSE", HasanColors.BgSurface3, HasanColors.TextMutedA11y, borderTinted = false)
+        job.lastStatus == "error" -> StatusPillStyle("ERREUR", HasanColors.AccentDim, HasanColors.Accent, borderTinted = true)
+        else -> StatusPillStyle("ACTIF", HasanColors.SuccessSoft, HasanColors.Success, borderTinted = true)
     }
-    TagPill(text = label, backgroundColor = bg, contentColor = fg)
+    val borderColor = if (style.borderTinted) style.fg.copy(alpha = 0.35f) else HasanColors.Border
+    Box(
+        modifier = Modifier
+            .background(style.bg)
+            .border(HasanDimens.BorderWidth, borderColor)
+            .padding(horizontal = 9.dp, vertical = 4.dp)
+    ) {
+        Text(text = style.label, color = style.fg, fontFamily = IBMPlexMono, fontSize = 11.sp, letterSpacing = 0.3.sp)
+    }
 }
 
 private fun Modifier.clickableTextPadding(onClick: () -> Unit): Modifier =

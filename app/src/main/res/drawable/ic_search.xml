@@ -1,16 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- #ic-wrench du mockup (update/hasan-rework-mockup.html ligne 689) — trait stroke 1.8,
-     PAS un remplissage plein. -->
+<!-- Loupe — stroke 1.8, cohérent avec .icon universel du mockup (fill:none). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
     <path
-        android:fillColor="#00000000"
         android:strokeColor="@android:color/white"
         android:strokeWidth="1.8"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M14.5,4.5 a4,4 0 0 0 -5.4,4.9 L4,14.5 L6.5,17 L11.6,11.9 a4,4 0 0 0 4.9,-5.4 L14.1,8.9 L12.1,6.9 Z" />
+        android:pathData="M11,4 C14.87,4 18,7.13 18,11 C18,14.87 14.87,18 11,18 C7.13,18 4,14.87 4,11 C4,7.13 7.13,4 11,4 Z M20,20 L16.5,16.5" />
 </vector>

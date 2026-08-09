@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
@@ -51,6 +54,7 @@ import com.hasan.v1.ui.theme.ChakraPetch
 import com.hasan.v1.ui.theme.HasanColors
 import com.hasan.v1.ui.theme.HasanDimens
 import com.hasan.v1.ui.theme.IBMPlexMono
+import com.hasan.v1.ui.theme.IBMPlexSans
 import com.hasan.v1.utils.TimeFormat
 import kotlinx.coroutines.launch
 
@@ -73,10 +77,29 @@ data class HasanNavItem(val tab: HasanNavTab, val iconRes: Int, val label: Strin
  * [ScreenTitle] à la place (cas réel : "Tools & Permissions").
  */
 @Composable
-fun HasanMinimalHeader(onMenuClick: () -> Unit, modifier: Modifier = Modifier, title: String? = null) {
+fun HasanMinimalHeader(
+    onMenuClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    title: String? = null,
+    trailingContent: @Composable () -> Unit = {}
+) {
+    // Fond BgHeader — le padding d'insets status bar est appliqué au niveau du ComposeView
+    // racine (MainActivity), pas ici : voir HasanHeader.kt pour l'explication complète
+    // (WindowInsets.statusBars ne traverse pas fiablement plusieurs ComposeView imbriqués).
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .background(HasanColors.BgHeader)
+            // border-bottom du mockup (.app-header, ligne 260 : 1px solid border-subtle) —
+            // voir HasanHeader.kt pour le même correctif côté Chat.
+            .drawBehind {
+                drawLine(
+                    color = HasanColors.Border,
+                    start = androidx.compose.ui.geometry.Offset(0f, size.height),
+                    end = androidx.compose.ui.geometry.Offset(size.width, size.height),
+                    strokeWidth = HasanDimens.BorderWidth.toPx()
+                )
+            }
             .padding(horizontal = HasanDimens.SpacingXl, vertical = HasanDimens.SpacingM),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -92,9 +115,10 @@ fun HasanMinimalHeader(onMenuClick: () -> Unit, modifier: Modifier = Modifier, t
                 fontFamily = ChakraPetch,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = HasanDimens.TextTitleMedium,
-                modifier = Modifier.padding(start = HasanDimens.SpacingM)
+                modifier = Modifier.weight(1f).padding(start = HasanDimens.SpacingM)
             )
         }
+        trailingContent()
     }
 }
 
@@ -211,11 +235,15 @@ fun HasanDrawerContent(
         modifier = Modifier
             .fillMaxSize()
             .background(HasanColors.BgBase)
-            .padding(vertical = HasanDimens.SpacingXl)
     ) {
-        DrawerHeader(onClose = callbacks.onClose)
+        Column(modifier = Modifier.padding(top = HasanDimens.SpacingXl, bottom = HasanDimens.SpacingM)) {
+            DrawerHeader(onClose = callbacks.onClose)
+        }
+        // .drawer-header { border-bottom } du mockup (ligne 471) — séparateur absent avant
+        // cette correction entre le header et la section NAVIGATION.
+        Box(modifier = Modifier.fillMaxWidth().height(HasanDimens.BorderWidth).background(HasanColors.Border))
 
-        Spacer(modifier = Modifier.height(HasanDimens.SpacingXxl))
+        Spacer(modifier = Modifier.height(HasanDimens.SpacingM))
         DrawerSectionTitle("NAVIGATION")
         Column {
             state.navItems.forEach { item ->
@@ -251,6 +279,7 @@ fun HasanDrawerContent(
         )
         Spacer(modifier = Modifier.height(HasanDimens.SpacingS))
         DrawerQuitRow(onClick = callbacks.onQuit)
+        Spacer(modifier = Modifier.height(HasanDimens.SpacingM))
     }
 }
 
@@ -263,14 +292,22 @@ private fun DrawerHeader(onClose: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = "HASAN",
-            color = HasanColors.TextPrimary,
-            fontFamily = ChakraPetch,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = HasanDimens.TextDisplaySmall,
-            letterSpacing = 2.sp
-        )
+        // logo-badge + "HASAN" du mockup (drawer-header, ligne 1137-1138) — logo absent avant
+        // cette correction (seul le wordmark texte était affiché).
+        // Logo + wordmark ~20% plus grands que le header Chat (HasanHeader.kt) — demande
+        // explicite utilisateur, spécifique au drawer (BrandMark/TextDisplaySmall par défaut
+        // restent inchangés ailleurs, pas de régression sur l'écran Chat déjà validé).
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)) {
+            BrandMark(size = 38.dp)
+            Text(
+                text = "HASAN",
+                color = HasanColors.TextPrimary,
+                fontFamily = ChakraPetch,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 18.sp,
+                letterSpacing = 2.sp
+            )
+        }
         HasanIconButton(
             iconRes = R.drawable.ic_close,
             contentDescription = "Fermer",
@@ -282,11 +319,12 @@ private fun DrawerHeader(onClose: () -> Unit) {
 
 @Composable
 private fun DrawerSectionTitle(text: String) {
+    // .nav-group-label du mockup (ligne 158) — font-size:11px, letter-spacing:.09em (~1sp à 11px).
     Text(
         text = text,
         color = HasanColors.TextMutedA11y,
         fontFamily = IBMPlexMono,
-        fontSize = HasanDimens.TextLabelMedium,
+        fontSize = 11.sp,
         letterSpacing = 1.sp,
         modifier = Modifier.padding(horizontal = HasanDimens.SpacingXl, vertical = HasanDimens.SpacingS)
     )
@@ -310,18 +348,29 @@ private fun DrawerNavRow(item: HasanNavItem, isActive: Boolean, onClick: () -> U
         Box(
             modifier = Modifier
                 .width(3.dp)
-                .height(HasanDimens.IconSmall)
+                .height(HasanDimens.IconMedium)
                 .background(if (isActive) HasanColors.Accent else androidx.compose.ui.graphics.Color.Transparent)
         )
         Spacer(modifier = Modifier.width(HasanDimens.SpacingM))
+        // .icon universel du mockup (ligne 138) — 20px, pas 16dp (IconSmall trop petit).
         Image(
             painter = painterResource(item.iconRes),
             contentDescription = null,
             colorFilter = ColorFilter.tint(contentColor),
-            modifier = Modifier.size(HasanDimens.IconSmall)
+            modifier = Modifier.size(20.dp)
         )
         Spacer(modifier = Modifier.width(HasanDimens.SpacingM))
-        Text(text = item.label, color = contentColor, fontFamily = IBMPlexMono, fontSize = HasanDimens.TextSubtitle)
+        // .drawer-nav-item du mockup (ligne 474-479) — pas de font-family propre, hérite du
+        // body (--font-body: Inter == IBMPlexSans ici), PAS IBMPlexMono ; font-size:14.5px ;
+        // .active { font-weight:600 } (sinon 500 par défaut sur .nav-btn, mais drawer-nav-item
+        // n'a pas de weight par défaut explicite — Normal convient hors état actif).
+        Text(
+            text = item.label,
+            color = contentColor,
+            fontFamily = IBMPlexSans,
+            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+            fontSize = 14.5.sp
+        )
     }
 }
 
@@ -337,6 +386,9 @@ private fun DrawerSessionRow(
     var menuExpanded by remember(session.id) { mutableStateOf(false) }
     val contentColor = if (session.isActive) HasanColors.Accent else HasanColors.TextPrimary
     Box {
+        // session-row du mockup (ligne 1463-1465) — point (sdot) AVANT le nom, pas après à
+        // droite ; pas de point du tout si la session n'est pas active (auparavant affiché
+        // systématiquement à droite pour l'état actif, position et emplacement inversés).
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -345,13 +397,28 @@ private fun DrawerSessionRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = session.label,
-                color = contentColor,
-                fontFamily = IBMPlexMono,
-                fontSize = HasanDimens.TextBodyMedium,
-                modifier = Modifier.weight(1f)
-            )
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (session.isActive) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(HasanColors.Accent)
+                    )
+                    Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+                }
+                // .session-row .sname du mockup (ligne 488) — font-size:13px, pas TextBodyMedium (12sp).
+                Text(
+                    text = session.label,
+                    color = contentColor,
+                    fontFamily = IBMPlexMono,
+                    fontSize = 13.sp
+                )
+            }
+            // .session-row .sage du mockup (ligne 490) — font-size:11px == TextCaption, inchangé.
             Text(
                 text = TimeFormat.formatRelativeSessionAge(session.lastMessageAt),
                 color = HasanColors.TextMutedA11y,
@@ -359,15 +426,6 @@ private fun DrawerSessionRow(
                 fontSize = HasanDimens.TextCaption,
                 modifier = Modifier.padding(start = HasanDimens.SpacingS)
             )
-            if (session.isActive) {
-                Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(HasanColors.Accent)
-                )
-            }
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
             DropdownMenuItem(
@@ -382,22 +440,27 @@ private fun DrawerSessionRow(
     }
 }
 
+// "Quitter l'app" du mockup (ligne 1157) — bouton pleine largeur SANS icône (juste le texte,
+// contrairement à la version précédente qui affichait une icône logout à gauche).
 @Composable
 private fun DrawerQuitRow(onClick: () -> Unit) {
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = HasanDimens.TouchTarget)
             .clickable(onClick = onClick)
             .padding(horizontal = HasanDimens.SpacingXl, vertical = HasanDimens.SpacingM),
-        verticalAlignment = Alignment.CenterVertically
+        contentAlignment = Alignment.Center
     ) {
-        Image(
-            painter = painterResource(R.drawable.ic_logout),
-            contentDescription = null,
-            colorFilter = ColorFilter.tint(HasanColors.TextMutedA11y),
-            modifier = Modifier.size(HasanDimens.IconSmall)
+        // .btn du mockup (ligne 1157) — même règle universelle que CutCornerOutlineButton :
+        // Chakra Petch, capitales, letter-spacing (pas IBM Plex Mono en casse normale).
+        Text(
+            text = "QUITTER L'APP",
+            color = HasanColors.TextMutedA11y,
+            fontFamily = ChakraPetch,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = HasanDimens.TextSubtitle,
+            letterSpacing = 0.8.sp
         )
-        Spacer(modifier = Modifier.width(HasanDimens.SpacingM))
-        Text(text = "Quitter l'app", color = HasanColors.TextMutedA11y, fontFamily = IBMPlexMono, fontSize = HasanDimens.TextSubtitle)
     }
 }

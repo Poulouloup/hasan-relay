@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,7 +26,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -118,70 +118,56 @@ private val DEFAULT_COLLAPSED_COLUMNS = setOf("done")
 @androidx.compose.material3.ExperimentalMaterial3Api
 @Composable
 fun KanbanScreen(state: KanbanScreenUiState, callbacks: KanbanCallbacks) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            HasanMinimalHeader(callbacks.onMenuClick, title = "Kanban")
-            KanbanHeader(
-                boards = state.boards,
-                selectedBoardSlug = state.selectedBoardSlug,
-                onRefresh = callbacks.onRefresh,
-                onSelectBoard = callbacks.onSelectBoard,
-                onShowCreateBoard = callbacks.onShowCreateBoard
+    Column(modifier = Modifier.fillMaxSize()) {
+        // HasanMinimalHeader porte désormais la ligne border-bottom partagée
+        // (.app-header, mockup ligne 260) — absente avant ce correctif, retour utilisateur
+        // constaté sur plusieurs onglets, fix centralisé dans le composant. Refresh/"+" vivent
+        // maintenant DANS cette même ligne de header (trailingContent), pas dans une seconde
+        // ligne en dessous — retour utilisateur : ils doivent être sur la ligne du titre, pas
+        // sous la bordure. Pas de FAB flottant circulaire (Material3 par défaut, hors DA
+        // cut-corner de l'app, sans équivalent dans le mockup) : "+" est un HasanIconButton
+        // transparent, même pattern que TasksHeader (TasksScreen.kt).
+        com.hasan.v1.ui.components.HasanMinimalHeader(
+            onMenuClick = callbacks.onMenuClick,
+            title = "Kanban"
+        ) {
+            com.hasan.v1.ui.components.RefreshIconButton(loading = state.loading, onClick = callbacks.onRefresh)
+            com.hasan.v1.ui.components.HasanIconButton(
+                iconRes = com.hasan.v1.R.drawable.ic_plus,
+                contentDescription = "Créer une tâche",
+                onClick = callbacks.onShowCreateTask
             )
+        }
+        KanbanBoardChip(
+            boards = state.boards,
+            selectedBoardSlug = state.selectedBoardSlug,
+            onSelectBoard = callbacks.onSelectBoard,
+            onShowCreateBoard = callbacks.onShowCreateBoard,
+            modifier = Modifier.padding(horizontal = HasanDimens.SpacingL, vertical = HasanDimens.SpacingM)
+        )
 
-            state.errorMessage?.let { message ->
-                KanbanErrorBanner(message = message, onDismiss = callbacks.onDismissError)
-            }
-
-            Box(modifier = Modifier.weight(1f)) {
-                when {
-                    state.loading && state.board == null -> {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = HasanColors.Accent)
-                        }
-                    }
-                    state.board == null || state.board.columns.all { it.tasks.isEmpty() } -> {
-                        Box(
-                            modifier = Modifier.fillMaxSize().padding(HasanDimens.SpacingXxl),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Aucune tâche sur ce board",
-                                color = HasanColors.TextMutedA11y,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-                    else -> {
-                        KanbanGroupedList(
-                            columns = state.board.columns,
-                            onTaskClick = callbacks.onTaskClick,
-                            onMoveTask = callbacks.onMoveTask
-                        )
-                    }
-                }
-            }
+        state.errorMessage?.let { message ->
+            KanbanErrorBanner(message = message, onDismiss = callbacks.onDismissError)
         }
 
-        FloatingActionButton(
-            onClick = callbacks.onShowCreateTask,
-            containerColor = HasanColors.Accent,
-            contentColor = HasanColors.TextPrimary,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(HasanDimens.SpacingL)
-        ) {
-            // lineHeight = fontSize : le glyphe "+" laisse sinon un espace de ligne
-            // asymétrique au-dessus/en-dessous (line-height typographique par défaut),
-            // qui décentre visuellement le "+" dans le FAB — voir
-            // archive/2026-07-23-audit-boutons-masque-punch-hole-pixel10.md.
-            Text(
-                text = "+",
-                fontSize = HasanDimens.TextTitleMedium,
-                lineHeight = HasanDimens.TextTitleMedium,
-                fontFamily = ChakraPetch,
-                fontWeight = FontWeight.SemiBold
-            )
+        Box(modifier = Modifier.weight(1f)) {
+            when {
+                state.loading && state.board == null -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = HasanColors.Accent)
+                    }
+                }
+                state.board == null || state.board.columns.all { it.tasks.isEmpty() } -> {
+                    KanbanEmptyState(onCreateTask = callbacks.onShowCreateTask)
+                }
+                else -> {
+                    KanbanGroupedList(
+                        columns = state.board.columns,
+                        onTaskClick = callbacks.onTaskClick,
+                        onMoveTask = callbacks.onMoveTask
+                    )
+                }
+            }
         }
     }
 
@@ -190,6 +176,65 @@ fun KanbanScreen(state: KanbanScreenUiState, callbacks: KanbanCallbacks) {
     }
     if (state.showCreateTaskDialog) {
         CreateTaskDialog(onDismiss = callbacks.onDismissCreateTask, onCreate = callbacks.onCreateTask)
+    }
+}
+
+// .empty-state du mockup (ligne 427-432, 880-884) — icône 44dp text-disabled, titre 16sp,
+// description max-width 260dp, bouton .btn-primary de largeur intrinsèque (PAS pleine
+// largeur). Bug corrigé : le Box(fillMaxSize()) précédent à l'intérieur du CutCornerPanel
+// forçait le bouton à s'étirer sur tout l'écran restant (aucune contrainte de taille sur
+// le parent Box.fillMaxSize().contentAlignment=Center propageait une taille non bornée
+// jusqu'à l'écran entier) — CutCornerFilledButton (largeur intrinsèque via wrapContentWidth
+// implicite d'un Row) remplace cette construction ad-hoc.
+@Composable
+private fun KanbanEmptyState(onCreateTask: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().padding(HasanDimens.SpacingXxl), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_kanban_nav),
+                contentDescription = null,
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextMuted),
+                modifier = Modifier.size(44.dp)
+            )
+            Spacer(modifier = Modifier.height(HasanDimens.SpacingM))
+            Text(
+                text = "Aucune carte pour l'instant",
+                color = HasanColors.TextPrimary,
+                fontFamily = ChakraPetch,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(HasanDimens.SpacingXs))
+            Text(
+                text = "Les tâches que Hermes planifie ou que tu ajoutes ici apparaîtront en colonnes — À faire, En cours, Fait.",
+                color = HasanColors.TextMutedA11y,
+                fontSize = 13.5.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.widthIn(max = 260.dp)
+            )
+            Spacer(modifier = Modifier.height(HasanDimens.SpacingL))
+            // .btn-primary du mockup (ligne 884) — SANS .btn-block : largeur intrinsèque au
+            // texte, pas pleine largeur (CutCornerFilledButton a fillMaxWidth() en dur, ce
+            // qui redonnerait le même bug de layout dans ce Column non contraint en largeur).
+            com.hasan.v1.ui.components.CutCornerPanel(
+                modifier = Modifier
+                    .heightIn(min = HasanDimens.TouchTarget)
+                    .clickable(onClick = onCreateTask),
+                backgroundColor = HasanColors.Accent,
+                borderColor = HasanColors.Accent
+            ) {
+                Text(
+                    text = "AJOUTER UNE PREMIÈRE CARTE",
+                    color = HasanColors.TextPrimary,
+                    fontFamily = ChakraPetch,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = HasanDimens.TextSubtitle,
+                    letterSpacing = 0.8.sp,
+                    modifier = Modifier.padding(horizontal = HasanDimens.SpacingL, vertical = HasanDimens.SpacingM)
+                )
+            }
+        }
     }
 }
 
@@ -378,65 +423,56 @@ private fun KanbanErrorBanner(message: String, onDismiss: () -> Unit) {
     }
 }
 
+// .mono-chip du mockup (ligne 313-316, 879 "board · default") — fond bg-surface-2,
+// bordure border-subtle, texte accent-strong mono 12px. Rendu cliquable (chevron ajouté,
+// absent du mockup statique) pour garder le switch de board — fonctionnalité demandée
+// explicitement, à préserver malgré l'absence d'équivalent dans la maquette.
 @Composable
-private fun KanbanHeader(
+private fun KanbanBoardChip(
     boards: List<KanbanBoardSummary>,
     selectedBoardSlug: String?,
-    onRefresh: () -> Unit,
     onSelectBoard: (String) -> Unit,
-    onShowCreateBoard: () -> Unit
+    onShowCreateBoard: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var boardMenuExpanded by remember { mutableStateOf(false) }
     val activeLabel = boards.firstOrNull { it.slug == selectedBoardSlug }?.name
         ?: selectedBoardSlug
         ?: "default"
 
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(HasanDimens.SpacingL),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box {
-            Row(
-                modifier = Modifier.clickable { boardMenuExpanded = true },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = activeLabel,
-                        color = HasanColors.TextPrimary,
-                        fontFamily = ChakraPetch,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = HasanDimens.TextTitleMedium
-                    )
-                    Text(
-                        text = "board kanban",
-                        color = HasanColors.TextMutedA11y,
-                        fontFamily = IBMPlexMono,
-                        fontSize = HasanDimens.TextCaption
-                    )
-                }
-                Text(text = "▾", color = HasanColors.TextMutedA11y, fontSize = HasanDimens.TextHeading, modifier = Modifier.padding(start = HasanDimens.SpacingS))
-            }
-            DropdownMenu(expanded = boardMenuExpanded, onDismissRequest = { boardMenuExpanded = false }) {
-                boards.forEach { board ->
-                    DropdownMenuItem(
-                        text = { Text(board.name ?: board.slug) },
-                        onClick = { boardMenuExpanded = false; onSelectBoard(board.slug) }
-                    )
-                }
+    Box(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .background(HasanColors.BgSurface2)
+                .border(HasanDimens.BorderWidth, HasanColors.Border)
+                .clickable { boardMenuExpanded = true }
+                .padding(horizontal = 9.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "board · $activeLabel",
+                color = HasanColors.AccentStrong,
+                fontFamily = IBMPlexMono,
+                fontSize = 12.sp
+            )
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_chevron_updown),
+                contentDescription = "Changer de board",
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.AccentStrong),
+                modifier = Modifier.size(14.dp).padding(start = 4.dp)
+            )
+        }
+        DropdownMenu(expanded = boardMenuExpanded, onDismissRequest = { boardMenuExpanded = false }) {
+            boards.forEach { board ->
                 DropdownMenuItem(
-                    text = { Text("+ Nouveau board") },
-                    onClick = { boardMenuExpanded = false; onShowCreateBoard() }
+                    text = { Text(board.name ?: board.slug) },
+                    onClick = { boardMenuExpanded = false; onSelectBoard(board.slug) }
                 )
             }
-        }
-        Box(
-            modifier = Modifier
-                .clickable(onClick = onRefresh)
-                .padding(HasanDimens.SpacingS)
-        ) {
-            Text(text = "↻", color = HasanColors.Accent, fontSize = HasanDimens.TextHeading)
+            DropdownMenuItem(
+                text = { Text("+ Nouveau board") },
+                onClick = { boardMenuExpanded = false; onShowCreateBoard() }
+            )
         }
     }
 }
@@ -710,8 +746,10 @@ private fun CreateBoardDialog(onDismiss: () -> Unit, onCreate: (slug: String, na
 private fun CreateTaskDialog(onDismiss: () -> Unit, onCreate: (title: String, body: String?, status: String?) -> Unit) {
     var title by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
-    var selectedStatus by remember { mutableStateOf<String?>(null) }
     val availableStatuses = remember { KANBAN_COLUMNS.filter { it != KANBAN_STATUS_RUNNING } }
+    // Catégorie présélectionnée par défaut (première colonne, ex: "triage") — retour
+    // utilisateur : une tâche créée sans choix explicite ne doit pas rester sans statut.
+    var selectedStatus by remember { mutableStateOf<String?>(availableStatuses.firstOrNull()) }
 
     Box(
         modifier = Modifier

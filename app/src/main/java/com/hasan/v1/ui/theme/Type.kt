@@ -28,14 +28,6 @@ val IBMPlexMono = FontFamily(
     Font(R.font.ibm_plex_mono_medium, FontWeight.Medium)
 )
 
-/** Style dédié aux données système (timestamps, latence, empreintes) — hors Typography Material par défaut. */
-val HasanMonoLabelSmall = TextStyle(
-    fontFamily = IBMPlexMono,
-    fontWeight = FontWeight.Normal,
-    fontSize = 10.sp,
-    letterSpacing = 0.5.sp
-)
-
 val HasanTypography = Typography(
     displaySmall = TextStyle(
         fontFamily = ChakraPetch,

@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -20,6 +21,8 @@ import com.hasan.v1.webui.WebUiMcpClient
 import com.hasan.v1.webui.WebUiProfilesClient
 import com.hasan.v1.webui.models.HermesProfile
 import com.hasan.v1.webui.models.McpServer
+import com.hasan.v1.ui.components.CertificatesOverlay
+import com.hasan.v1.ui.components.HasanConfirmOverlay
 import com.hasan.v1.ui.screens.ConnectionStatusUi
 import com.hasan.v1.ui.screens.SettingsCallbacks
 import com.hasan.v1.ui.screens.SettingsScreen
@@ -90,6 +93,17 @@ class SettingsFragment : Fragment() {
     /** Empêche de rouvrir le dialog cert relay en boucle tant que relayCertCheck reste non-null. */
     private var relayCertDialogShown = false
 
+    // ─────────────────────────── Certificats de confiance ──────────────────
+    // Overlay Compose (CertificatesOverlay + HasanConfirmOverlay empilé pour les
+    // confirmations) — remplace l'ancien showTrustedCertsDialog() en AlertDialog natif.
+
+    private var showCertsOverlayState by mutableStateOf(false)
+    private var trustedCertsState by mutableStateOf<Map<String, String>>(emptyMap())
+
+    /** Confirmation en attente (révocation d'un cert précis, ou "tout effacer" si key/fingerprint sont vides). */
+    private data class PendingCertAction(val key: String?, val fingerprint: String?)
+    private var pendingCertActionState by mutableStateOf<PendingCertAction?>(null)
+
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
     ): View {
@@ -101,6 +115,7 @@ class SettingsFragment : Fragment() {
             loadMcpServers()
             setContent {
                 HasanTheme {
+                Box {
                     SettingsScreen(
                         state = SettingsUiState(
                             relayPaired = relayPairedState,
@@ -137,7 +152,10 @@ class SettingsFragment : Fragment() {
                             aboutFeatures = getString(R.string.settings_about_features)
                         ),
                         callbacks = SettingsCallbacks(
-                            onManageCerts = { showTrustedCertsDialog() },
+                            onManageCerts = {
+                                refreshTrustedCerts()
+                                showCertsOverlayState = true
+                            },
                             onScanQrPairing = { (activity as? MainActivity)?.scanQrForPairing() },
                             onRelayManualUrlChange = { url -> relayManualUrlState = url },
                             onRelayManualCodeChange = { code -> relayManualCodeState = code },
@@ -197,6 +215,37 @@ class SettingsFragment : Fragment() {
                             onMenuClick = { (activity as? MainActivity)?.openDrawer() }
                         )
                     )
+
+                    if (showCertsOverlayState) {
+                        CertificatesOverlay(
+                            certs = trustedCertsState,
+                            onRevokeRequest = { key, fingerprint -> pendingCertActionState = PendingCertAction(key, fingerprint) },
+                            onClearAllRequest = { pendingCertActionState = PendingCertAction(null, null) },
+                            onDismiss = { showCertsOverlayState = false }
+                        )
+                    }
+
+                    pendingCertActionState?.let { pending ->
+                        val isClearAll = pending.key == null
+                        HasanConfirmOverlay(
+                            title = if (isClearAll) "Tout effacer" else "Révoquer ce certificat ?",
+                            message = if (isClearAll)
+                                "Supprimer tous les certificats de confiance ? Toutes les connexions demanderont une nouvelle approbation."
+                            else
+                                "Empreinte : ${pending.fingerprint}\n\nLa prochaine connexion à ce serveur demandera une nouvelle approbation.",
+                            confirmLabel = if (isClearAll) "Effacer" else "Supprimer",
+                            cancelLabel = "Annuler",
+                            destructive = true,
+                            onConfirm = {
+                                if (isClearAll) settings.clearAllTrustedCerts()
+                                else settings.removeTrustedCertFingerprint(pending.key!!)
+                                refreshTrustedCerts()
+                                pendingCertActionState = null
+                            },
+                            onCancel = { pendingCertActionState = null }
+                        )
+                    }
+                }
                 }
             }
         }
@@ -519,67 +568,13 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Dialog de gestion des certificats de confiance.
-     * Liste tous les serveurs approuvés avec leur fingerprint tronqué.
-     * Bouton "Supprimer" sur chaque entrée pour révoquer la confiance.
-     * Bouton "Tout effacer" en bas pour réinitialiser.
+     * Force la recomposition de CertificatesOverlay après une mutation (révocation/effacement) —
+     * SettingsManager.getAllTrustedCerts() n'est pas observable (EncryptedSharedPreferences),
+     * donc on relit explicitement et on pousse dans l'état Compose (même pattern que
+     * populateNativeEngineOptions()/loadMcpServers() ailleurs dans ce Fragment).
      */
-    private fun showTrustedCertsDialog() {
-        val certs = settings.getAllTrustedCerts()
-
-        if (certs.isEmpty()) {
-            HasanDialog.confirm(
-                context = requireContext(),
-                title = "Certificats de confiance",
-                message = "Aucun certificat enregistré.\n\nLes certificats sont ajoutés automatiquement lors du premier test de connexion.",
-                confirmLabel = "Fermer",
-                cancelLabel = "Fermer",
-                onConfirm = {},
-                onCancel = {}
-            )
-            return
-        }
-
-        val entries = certs.entries.toList()
-        val labels = entries.map { (_, fingerprint) ->
-            val parts = fingerprint.split(":")
-            if (parts.size > 8)
-                "${parts.take(3).joinToString(":")}:…:${parts.takeLast(3).joinToString(":")}"
-            else fingerprint
-        }
-
-        // Affiche la liste, puis au tap : dialog de révocation
-        val listItems = labels + listOf("Tout effacer")
-        HasanDialog.list(
-            context = requireContext(),
-            title = "Certificats de confiance (${certs.size})",
-            items = listItems,
-            onSelect = { index ->
-                if (index == entries.size) {
-                    HasanDialog.confirm(
-                        context = requireContext(),
-                        title = "Tout effacer",
-                        message = "Supprimer tous les certificats de confiance ? Toutes les connexions demanderont une nouvelle approbation.",
-                        confirmLabel = "Effacer",
-                        cancelLabel = "Annuler",
-                        destructive = true,
-                        onConfirm = { settings.clearAllTrustedCerts() }
-                    )
-                } else {
-                    val key = entries[index].key
-                    val fingerprint = entries[index].value
-                    HasanDialog.confirm(
-                        context = requireContext(),
-                        title = "Révoquer ce certificat ?",
-                        message = "Empreinte : $fingerprint\n\nLa prochaine connexion à ce serveur demandera une nouvelle approbation.",
-                        confirmLabel = "Supprimer",
-                        cancelLabel = "Annuler",
-                        destructive = true,
-                        onConfirm = { settings.removeTrustedCertFingerprint(key) }
-                    )
-                }
-            }
-        )
+    private fun refreshTrustedCerts() {
+        trustedCertsState = settings.getAllTrustedCerts()
     }
 
 }

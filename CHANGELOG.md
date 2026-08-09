@@ -190,7 +190,72 @@ montre déjà le quoi).
   depuis le retrait de SkillClaw (DeepSeek natif renvoie `usage`
   correctement) — remis au comportement simple d'origine.
 
+### Removed
+- Code mort laissé par la migration vers Compose : `DiagonalCutShape` et les
+  formes `HasanShapes.diagonal`/`diagonalLarge` (reliquats de l'ancien mockup
+  `hasan-mockup-v2.html`, dernier usage retiré avec la reprise du mode mains
+  libres), le composable `StatusBadge` et le style `HasanMonoLabelSmall`
+  (jamais appelés), 16 drawables orphelins (fonds de bulles et boutons ronds
+  désormais dessinés via `CutCornerShape`, icônes de navigation remplacées par
+  celles retracées depuis le mockup) et 12 imports inutilisés. Le commentaire
+  d'en-tête de `Shape.kt` pointait encore vers l'ancien mockup.
+  Vérifié avant suppression : aucune résolution dynamique de ressource
+  (`getIdentifier`) dans le projet, donc l'analyse statique des références est
+  fiable. Les layouts consommés uniquement via ViewBinding (sans `R.layout.X`
+  littéral) et les imports `getValue`/`setValue` requis par la délégation
+  `by remember` sont des faux positifs classiques, explicitement conservés.
+
 ### Fixed
+- Bande de status bar (zone du poinçon caméra) laissée en `BgBase` sur tous
+  les onglets : le padding d'insets, appliqué une seule fois au niveau du
+  `AndroidView` racine (`MainActivity`), réservait bien la place de la status
+  bar mais n'y peignait rien — le header semblait donc flotter au lieu de
+  remonter jusqu'en haut de l'écran comme dans le mockup. Bande peinte en
+  `BgHeader` au même niveau que le padding qui la crée, et non dans
+  `HasanHeader`/`HasanMinimalHeader` : ces composants vivent 2 `ComposeView`
+  plus bas (`AndroidView` → Fragment → `ComposeView`), où les `WindowInsets`
+  Compose ne se propagent pas de façon fiable (raison déjà documentée pour le
+  padding lui-même). Exclut le mode mains libres, seul écran sans header — une
+  bande colorée y aurait tranché sur son fond plein cadre.
+- Ligne de séparation sous le header absente sur de nombreux onglets : ni
+  `HasanHeader` ni `HasanMinimalHeader` n'implémentaient le `border-bottom` du
+  mockup (`.app-header`, ligne 260). Corrigé dans les deux composants partagés
+  plutôt qu'écran par écran — ce qui a révélé au passage que
+  `ToolsPermissionsScreen` plaçait son titre dans un `ScreenTitle` SOUS le
+  header (donc sous la nouvelle bordure) avec un séparateur manuel devenu
+  doublon.
+- Bouton "+" du Kanban rendu en `FloatingActionButton` Material3 : cercle
+  flottant hors DA (l'app est en coins coupés) et sans équivalent dans le
+  mockup — la règle CSS `.fab` y existe mais n'est jamais utilisée dans le
+  markup, seul le `.mic-fab` inline du composer est réel. Remplacé par un
+  `HasanIconButton` posé dans la ligne du header (nouveau slot
+  `trailingContent` sur `HasanMinimalHeader`), même motif que `TasksHeader`.
+  La création de tâche présélectionne désormais une catégorie par défaut au
+  lieu de laisser la nouvelle tâche sans statut.
+- Micro du mode mains libres qui se décalait vers le bas ~1 s après le tap :
+  l'anneau de pulsation (148 dp) n'était ajouté à la composition que lorsque
+  `isListening` passait à vrai, et son conteneur, dimensionné sur son contenu,
+  passait alors de 128 dp à 148 dp. Le délai perçu était celui du démarrage
+  réel du moteur STT. Conteneur à taille fixe et anneau toujours composé
+  (masqué par `alpha`) : la mesure ne dépend plus de l'état.
+- Dernière ligne du transcript mains libres illisible, à moitié recouverte par
+  le dégradé d'estompage de débordement. Deux approches ont échoué avant la
+  bonne : une fraction de la hauteur du bloc (zone estompée proportionnelle au
+  texte, de plus en plus mordante) puis un multiple de hauteur de ligne
+  supposée (le rendu markdown ne garantit pas des lignes égales — un titre est
+  plus haut). Une ligne vide ajoutée en fin de markdown ne marche pas non
+  plus : Markwon la rend à hauteur réduite (~40 px mesurés sur device). Le
+  dégradé court désormais sur une marge basse vide réservée DANS le `TextView`
+  (nouveau paramètre `bottomPaddingPx` de `MarkdownText`) — déterministe, et
+  invisible aux `Modifier.padding` Compose extérieurs qui ne seraient pas
+  couverts par le dégradé.
+- Mode mains libres jamais migré depuis l'ancien mockup
+  (`hasan-mockup-v2.html`) : forme du micro en `diagonalLarge` et boutons bas
+  en petites puces IBM Plex Mono au lieu des `.btn-ghost` (Chakra Petch
+  capitales, `min-height` 44 px). Icône du micro portée de 34 dp à 56 dp dans
+  un bouton de 128 dp — elle n'en occupait qu'un quart. Transcript rendu en
+  markdown (moteur Markwon partagé avec les bulles de chat) au lieu de texte
+  brut, qui affichait les marqueurs `**`/`` ` ``/`-` en plein écran vocal.
 - `_send_fcm_wake` (`server/relay/server.py`) appelait
   `run_in_executor(None, messaging.send, message, fcm_app)` — le 3e argument
   positionnel atterrit sur `dry_run` (signature réelle :

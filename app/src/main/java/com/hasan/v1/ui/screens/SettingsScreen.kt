@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.hasan.v1.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
@@ -9,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,6 +22,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.alpha
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -34,8 +38,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -46,6 +53,7 @@ import androidx.compose.ui.unit.sp
 import com.hasan.v1.R
 import com.hasan.v1.ui.components.CutCornerPanel
 import com.hasan.v1.ui.components.HasanToggle
+import com.hasan.v1.ui.theme.ChakraPetch
 import com.hasan.v1.ui.theme.HasanColors
 import com.hasan.v1.ui.theme.HasanDimens
 import com.hasan.v1.ui.theme.HasanShapes
@@ -129,31 +137,57 @@ class SettingsCallbacks(
     val onMenuClick: () -> Unit
 )
 
-private val sectionTitleColor = HasanColors.Accent
+private val sectionTitleColor = HasanColors.AccentLight
 
+/**
+ * .section-label du mockup (ligne 394-399) — préfixe "// " en text-disabled généré par
+ * ::before (couleur différente du reste du texte, donc deux Text plutôt qu'un préfixe
+ * inline), font-size:11.5px (pas TextLabelSmall=9sp), color:var(--accent) (AccentLight,
+ * pas Accent/deep — trop sombre pour ce rôle), border-top dashed sauf pour :first-child.
+ */
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text = text,
-        color = sectionTitleColor,
-        fontFamily = IBMPlexMono,
-        fontWeight = FontWeight.Medium,
-        fontSize = HasanDimens.TextLabelSmall,
-        letterSpacing = 1.5.sp,
-        modifier = Modifier.padding(start = HasanDimens.SpacingXs, bottom = HasanDimens.SpacingS)
+private fun SectionTitle(text: String, isFirst: Boolean = false) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (isFirst) Modifier
+                else Modifier.dashedBorderTop(HasanColors.BorderStrong).padding(top = 14.dp)
+            )
+    ) {
+        Text(text = "// ", color = HasanColors.TextMuted, fontFamily = IBMPlexMono, fontSize = 11.5.sp, letterSpacing = 1.sp)
+        Text(
+            text = text,
+            color = sectionTitleColor,
+            fontFamily = IBMPlexMono,
+            fontSize = 11.5.sp,
+            letterSpacing = 1.sp
+        )
+    }
+}
+
+private fun Modifier.dashedBorderTop(color: Color): Modifier = drawBehind {
+    drawLine(
+        color = color,
+        start = Offset(0f, 0f),
+        end = Offset(size.width, 0f),
+        strokeWidth = 1.dp.toPx(),
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()), 0f)
     )
 }
 
 /**
- * Groupe .settings-group : label mono accent + panel à coin coupé contenant des lignes
- * .settings-row empilées (pas de padding interne, chaque SettingsRow se pad elle-même).
+ * .card du mockup (ligne 287-291, ex: 1049-1051 pour Serveurs MCP) — padding:16px sur la
+ * card elle-même, PUIS .list-row{padding:13px 2px} à l'intérieur. Sans le padding ici, le
+ * texte/statut des lignes colle directement au bord de la card (2dp de SettingsRow ne
+ * suffit pas seul — il s'ajoute au padding de la card, pas le remplace).
  */
 @Composable
 private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column {
         SectionTitle(title)
-        CutCornerPanel(modifier = Modifier.fillMaxWidth()) {
-            Column(content = content)
+        CutCornerPanel(modifier = Modifier.fillMaxWidth(), shape = HasanShapes.panel(cut = 12.dp)) {
+            Column(modifier = Modifier.padding(HasanDimens.SpacingL), content = content)
         }
     }
 }
@@ -173,10 +207,13 @@ private fun SettingsControlPanel(title: String, content: @Composable ColumnScope
  * Ligne .settings-row : label à gauche, contenu (valeur mono, toggle...) à droite,
  * séparateur horizontal sauf sur la dernière ligne du panel (géré par l'appelant via `showDivider`).
  */
+// .list-row du mockup (ligne 402-408) — padding:13px 2px, min-height:44px, .rl-title
+// font-size:14.5px, .rl-sub font-size:12px (pas TextBodyMedium=12sp/TextCaption=11sp).
 @Composable
 private fun SettingsRow(
     label: String,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     showDivider: Boolean = true,
     trailing: @Composable () -> Unit
 ) {
@@ -184,16 +221,27 @@ private fun SettingsRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
+                .heightIn(min = 44.dp)
+                .padding(horizontal = 2.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = label,
-                color = HasanColors.TextPrimary,
-                fontFamily = IBMPlexSans,
-                fontSize = HasanDimens.TextBodyMedium,
-                modifier = Modifier.weight(1f)
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    color = HasanColors.TextPrimary,
+                    fontFamily = IBMPlexSans,
+                    fontSize = 14.5.sp
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        color = HasanColors.TextMutedA11y,
+                        fontFamily = IBMPlexMono,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 1.dp)
+                    )
+                }
+            }
             trailing()
         }
         if (showDivider) {
@@ -363,21 +411,27 @@ private fun SettingsEditableRow(
 
 /** Bouton pleine largeur à coin coupé, fond plein — équivalent .btn-primary du mockup. */
 @Composable
-private fun CutCornerFilledButton(
+fun CutCornerFilledButton(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     backgroundColor: Color = HasanColors.Accent,
     contentColor: Color = HasanColors.TextPrimary,
     shape: Shape = HasanShapes.panelSmall(),
-    icon: Int? = null
+    icon: Int? = null,
+    enabled: Boolean = true
 ) {
+    // .btn du mockup (ligne 321-324) — Chakra Petch capitales letter-spacing, min-height:44px,
+    // même règle universelle que CutCornerOutlineButton (pas IBMPlexSans casse normale).
+    // .btn[disabled]{ opacity:.4 } du mockup (ligne 349) — pas d'état grisé auparavant.
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 44.dp)
             .clip(shape)
+            .alpha(if (enabled) 1f else 0.4f)
             .background(backgroundColor)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = HasanDimens.SpacingM),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
@@ -391,11 +445,23 @@ private fun CutCornerFilledButton(
             )
             Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
         }
-        Text(text = text, color = contentColor, fontFamily = IBMPlexSans, fontSize = HasanDimens.TextBody)
+        Text(
+            text = text.uppercase(),
+            color = contentColor,
+            fontFamily = ChakraPetch,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = HasanDimens.TextSubtitle,
+            letterSpacing = 0.8.sp
+        )
     }
 }
 
-/** Bouton pleine largeur à coin coupé, contour seul — équivalent .btn-outline du mockup. */
+/**
+ * Bouton pleine largeur à coin coupé, contour seul — équivalent .btn du mockup (ligne 321-330).
+ * TOUS les boutons .btn (peu importe la variante ghost/primary/danger) partagent : police
+ * Chakra Petch, capitales forcées, letter-spacing — pas IBM Plex Sans en casse normale
+ * (règle universelle du système de boutons, pas une exception pour ce composant précis).
+ */
 @Composable
 fun CutCornerOutlineButton(
     text: String,
@@ -407,8 +473,11 @@ fun CutCornerOutlineButton(
     shape: Shape = HasanShapes.panelSmall()
 ) {
     Box(
+        // .btn du mockup (ligne 321-324) — min-height:var(--tap-min) == 44px, pas garanti
+        // par le seul padding vertical (SpacingM*2 + texte ≈ 42dp, en dessous de la cible).
         modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 44.dp)
             .clip(shape)
             .background(backgroundColor)
             .border(HasanDimens.BorderWidth, borderColor, shape)
@@ -416,7 +485,54 @@ fun CutCornerOutlineButton(
             .padding(vertical = HasanDimens.SpacingM),
         contentAlignment = Alignment.Center
     ) {
-        Text(text = text, color = contentColor, fontFamily = IBMPlexSans, fontSize = HasanDimens.TextSubtitle)
+        Text(
+            text = text.uppercase(),
+            color = contentColor,
+            fontFamily = ChakraPetch,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = HasanDimens.TextSubtitle,
+            letterSpacing = 0.8.sp
+        )
+    }
+}
+
+/**
+ * .link-row du mockup (ligne 409-411, 1005-1008) — icône optionnelle à gauche + texte,
+ * chevron/flèche à droite, PAS un .btn (pas de capitales/Chakra Petch) : padding:15px 14px,
+ * min-height:44px, font-size:14.5px, casse normale IBM Plex Sans.
+ */
+@Composable
+private fun LinkRow(text: String, onClick: () -> Unit, leadingIcon: Int? = null, trailingIcon: Int = R.drawable.ic_chevron_r) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 44.dp)
+            .clip(HasanShapes.panel(cut = 12.dp))
+            .background(HasanColors.BgSurface2)
+            .border(HasanDimens.BorderWidth, HasanColors.Border, HasanShapes.panel(cut = 12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 15.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (leadingIcon != null) {
+                Image(
+                    painter = painterResource(leadingIcon),
+                    contentDescription = null,
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextPrimary),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(11.dp))
+            }
+            Text(text = text, color = HasanColors.TextPrimary, fontFamily = IBMPlexSans, fontSize = 14.5.sp)
+        }
+        Image(
+            painter = painterResource(trailingIcon),
+            contentDescription = null,
+            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.Accent),
+            modifier = Modifier.size(HasanDimens.IconSmall)
+        )
     }
 }
 
@@ -471,7 +587,7 @@ fun SettingsScreen(
 @Composable
 private fun ConnectionSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
     Column(verticalArrangement = Arrangement.spacedBy(HasanDimens.SpacingL)) {
-        SectionTitle("CONNEXIONS")
+        SectionTitle("CONNEXIONS", isFirst = true)
 
         state.relayErrorMessage?.let { message ->
             RelayErrorBanner(message = message, onDismiss = callbacks.onDismissRelayError)
@@ -493,9 +609,10 @@ private fun ConnectionSection(state: SettingsUiState, callbacks: SettingsCallbac
 
         ManualConnectionAccordion(state, callbacks)
 
-        CutCornerOutlineButton(
+        LinkRow(
             text = "Gérer les certificats de confiance",
-            onClick = callbacks.onManageCerts
+            onClick = callbacks.onManageCerts,
+            leadingIcon = R.drawable.ic_shield
         )
     }
 }
@@ -503,45 +620,27 @@ private fun ConnectionSection(state: SettingsUiState, callbacks: SettingsCallbac
 /** Statut des deux connexions d'un coup d'œil — chat (texte + déconnexion) et relay (switch protégé). */
 @Composable
 private fun ConnectionStatusPanel(state: SettingsUiState, callbacks: SettingsCallbacks) {
-    CutCornerPanel(modifier = Modifier.fillMaxWidth()) {
+    // .card du mockup (ligne 970-982) — UN SEUL niveau de panel (--notch:12px hérité de
+    // :root), pas de sous-panel .settings-group imbriqué à l'intérieur : Chat/Relay sont
+    // des .list-row directement sur le fond de la card, séparées par leur propre
+    // border-bottom (voir SettingsRow), pas par un second fond gris.
+    CutCornerPanel(modifier = Modifier.fillMaxWidth(), shape = HasanShapes.panel(cut = 12.dp)) {
         Column(modifier = Modifier.padding(HasanDimens.SpacingL)) {
-            Column(modifier = Modifier.clip(HasanShapes.panelSmall()).background(HasanColors.BgSurface2)) {
-                SettingsRow(label = "Chat (hermes-webui)") {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (state.webUiLoggedIn) HasanColors.Accent else HasanColors.TextSecondary)
-                        )
-                        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
-                        Text(
-                            text = state.webUiConnectionStatus?.message
-                                ?: if (state.webUiLoggedIn) "Connecté" else "Non connecté",
-                            color = if (state.webUiLoggedIn) HasanColors.Accent else HasanColors.TextSecondary,
-                            fontFamily = IBMPlexMono,
-                            fontSize = HasanDimens.TextLabelMedium
-                        )
-                    }
-                }
-                SettingsRow(label = "Relay (téléphone)", showDivider = false) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (state.relayPaired && state.relayEnabled) HasanColors.Accent else HasanColors.TextSecondary)
-                        )
-                        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
-                        Text(
-                            text = relayStatusLabel(state.relayPaired, state.relayEnabled, state.relayConnectionStatus),
-                            color = if (state.relayPaired && state.relayEnabled) HasanColors.Accent else HasanColors.TextSecondary,
-                            fontFamily = IBMPlexMono,
-                            fontSize = HasanDimens.TextLabelMedium
-                        )
-                        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
-                        HasanToggle(checked = state.relayEnabled, onCheckedChange = callbacks.onRelayToggle)
-                    }
+            SettingsRow(label = "Chat", subtitle = "hermes-webui") {
+                ConnectionStatusBadge(
+                    text = state.webUiConnectionStatus?.message
+                        ?: if (state.webUiLoggedIn) "Connecté" else "Non connecté",
+                    success = state.webUiLoggedIn
+                )
+            }
+            SettingsRow(label = "Relay", subtitle = "Actions téléphone", showDivider = false) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ConnectionStatusBadge(
+                        text = relayStatusLabel(state.relayPaired, state.relayEnabled, state.relayConnectionStatus),
+                        success = state.relayPaired && state.relayEnabled
+                    )
+                    Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+                    HasanToggle(checked = state.relayEnabled, onCheckedChange = callbacks.onRelayToggle)
                 }
             }
 
@@ -719,10 +818,13 @@ private fun relayStatusLabel(
     enabled: Boolean,
     status: com.hasan.v1.network.RelayConnectionStatus
 ): String {
+    // "Connecté" seul (pas "Appairé — connecté") côté CONNECTED — section 7 du brief
+    // next_update/PROMPT_CLAUDE_CODE.md : le sous-titre "Actions téléphone" porte déjà
+    // le contexte "relay/appairage", inutile de le répéter dans le badge de statut.
     if (!paired) return "Non appairé"
     if (!enabled) return "Appairé — désactivé"
     return when (status) {
-        com.hasan.v1.network.RelayConnectionStatus.CONNECTED -> "Appairé — connecté"
+        com.hasan.v1.network.RelayConnectionStatus.CONNECTED -> "Connecté"
         com.hasan.v1.network.RelayConnectionStatus.CONNECTING -> "Appairé — connexion…"
         com.hasan.v1.network.RelayConnectionStatus.RECONNECTING -> "Appairé — reconnexion…"
         com.hasan.v1.network.RelayConnectionStatus.DISCONNECTED -> "Appairé — déconnecté"
@@ -750,7 +852,7 @@ private fun McpServersSection(state: SettingsUiState, callbacks: SettingsCallbac
                         onCheckedChange = { checked -> callbacks.onMcpToggle(server.name, checked) }
                     )
                 } else {
-                    SettingsRowValue(text = if (server.enabled) "Actif" else "Inactif")
+                    HasanBadge(text = if (server.enabled) "Actif" else "Inactif", success = server.enabled)
                 }
             }
         }
@@ -824,6 +926,14 @@ private fun VoiceSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
             // Sous-sélecteur moteur natif, puis voix du moteur choisi
             if (state.nativeEngines.isNotEmpty()) {
                 Divider()
+                // "Reconnaissance vocale (STT)" du mockup (ligne 1021, .rl-sub) — label absent
+                // avant cette correction, le radio Google apparaissait seul sans en-tête.
+                Text(
+                    text = "Reconnaissance vocale (STT)",
+                    color = HasanColors.TextPrimary,
+                    fontSize = HasanDimens.TextBody,
+                    modifier = Modifier.padding(top = HasanDimens.SpacingM, bottom = 6.dp)
+                )
                 RadioOptionGroup(
                     options = state.nativeEngines.map { it.name to it.label },
                     selected = state.nativeSelectedEngine,
@@ -842,19 +952,16 @@ private fun VoiceSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
     }
 }
 
+// .radio-row du mockup (ligne 371, 1018-1019) — pas de bordure ni de fond, même état
+// sélectionné/non-sélectionné, seul le petit indicateur .radio change. Le cadre rouge
+// complet ajoutait un contour absent du mockup.
 @Composable
 private fun ProviderChoiceRow(label: String, selected: Boolean, onClick: () -> Unit) {
-    val borderColor = if (selected) HasanColors.Accent else HasanColors.Border
-    val bgColor = if (selected) HasanColors.AccentGlowBg else HasanColors.BgSurface2
-    val shape = HasanShapes.panelSmall()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(shape)
-            .background(bgColor)
-            .border(HasanDimens.BorderWidth, borderColor, shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS),
+            .padding(vertical = HasanDimens.SpacingS),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RadioDot(selected = selected)
@@ -886,20 +993,80 @@ private fun RadioOptionGroup(
     }
 }
 
+/**
+ * .badge.badge-success avec .dot du mockup (ligne 973/978) — même fond+bordure teintés que
+ * HasanBadge, plus un point 7px avec halo (box-shadow 0 0 0 3px success-soft) avant le texte.
+ * "Connecté" côté Chat/Relay affichait un simple point + texte sans aucun fond de badge
+ * avant cette correction — écart visible en comparant à l'échelle réelle du mockup.
+ */
+@Composable
+private fun ConnectionStatusBadge(text: String, success: Boolean) {
+    val contentColor = if (success) HasanColors.Success else HasanColors.TextMutedA11y
+    val bgColor = if (success) HasanColors.SuccessSoft else HasanColors.BgSurface3
+    val borderColor = if (success) HasanColors.Success.copy(alpha = 0.35f) else HasanColors.Border
+    // .badge du mockup (ligne 377) — rectangle simple, PAS de cut-corner (aucun clip-path
+    // sur .badge/.badge-success dans le CSS source).
+    Row(
+        modifier = Modifier
+            .background(bgColor)
+            .border(HasanDimens.BorderWidth, borderColor)
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(13.dp)
+                .clip(CircleShape)
+                .background(if (success) HasanColors.SuccessSoft else Color.Transparent),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(contentColor)
+            )
+        }
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(text = text, color = contentColor, fontFamily = IBMPlexMono, fontSize = 11.sp, letterSpacing = 0.3.sp)
+    }
+}
+
+/**
+ * .badge.badge-success / .badge-muted du mockup (ligne 377-379) — fond + bordure teintés,
+ * pas juste du texte coloré seul (écart observé sur "Actif"/"Inactif"/"Autorisée").
+ */
+@Composable
+private fun HasanBadge(text: String, success: Boolean) {
+    val contentColor = if (success) HasanColors.Success else HasanColors.TextMutedA11y
+    val bgColor = if (success) HasanColors.SuccessSoft else HasanColors.BgSurface3
+    val borderColor = if (success) HasanColors.Success.copy(alpha = 0.35f) else HasanColors.Border
+    // .badge du mockup (ligne 377) — rectangle simple, pas de cut-corner.
+    Box(
+        modifier = Modifier
+            .background(bgColor)
+            .border(HasanDimens.BorderWidth, borderColor)
+            .padding(horizontal = 9.dp, vertical = 4.dp)
+    ) {
+        Text(text = text, color = contentColor, fontFamily = IBMPlexMono, fontSize = 11.sp, letterSpacing = 0.3.sp)
+    }
+}
+
+// .radio du mockup (ligne 372-374) — 19px, bordure 1.5px border-strong (accent si .on),
+// marqueur intérieur CARRÉ (inset:5px, aucun border-radius sur ::after), pas un rond.
 @Composable
 private fun RadioDot(selected: Boolean) {
     Box(
         modifier = Modifier
-            .size(16.dp)
+            .size(19.dp)
             .clip(CircleShape)
-            .border(1.5.dp, if (selected) HasanColors.Accent else HasanColors.TextSecondary, CircleShape),
+            .border(1.5.dp, if (selected) HasanColors.Accent else HasanColors.BorderStrong, CircleShape),
         contentAlignment = Alignment.Center
     ) {
         if (selected) {
             Box(
                 modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
+                    .size(9.dp)
                     .background(HasanColors.Accent)
             )
         }
@@ -930,16 +1097,49 @@ private fun LabeledSlider(
         Text(text = label, color = HasanColors.TextPrimary, fontSize = HasanDimens.TextBody, modifier = Modifier.weight(1f))
         Text(text = valueText, color = HasanColors.TextSecondary, fontSize = HasanDimens.TextSubtitle)
     }
+    // input[type=range] du mockup (ligne 1015/1017) — piste continue, aucun repère de step
+    // visible malgré step="0.1"/step natif (rendu navigateur par défaut). Le Slider Material3
+    // dessine un tick par step quand steps>0 (pointillés visibles à l'écran, absents du
+    // mockup) — track custom sans tick marks, le snapping logique (steps) reste inchangé.
     Slider(
         value = value,
         onValueChange = onValueChange,
         valueRange = valueRange,
         steps = steps,
+        thumb = { sliderThumbCircle() },
+        track = { sliderState ->
+            val fraction = ((sliderState.value - sliderState.valueRange.start) /
+                (sliderState.valueRange.endInclusive - sliderState.valueRange.start)).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .background(HasanColors.Border)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .height(4.dp)
+                        .background(HasanColors.Accent)
+                )
+            }
+        },
         colors = SliderDefaults.colors(
             thumbColor = HasanColors.Accent,
             activeTrackColor = HasanColors.Accent,
             inactiveTrackColor = HasanColors.Border
         )
+    )
+}
+
+/** Poignée ronde pleine (~16dp) — le thumb par défaut Material3 est une barre verticale épaisse, absente du mockup (input[type=range] natif, poignée circulaire discrète). */
+@Composable
+private fun sliderThumbCircle() {
+    Box(
+        modifier = Modifier
+            .size(16.dp)
+            .clip(CircleShape)
+            .background(HasanColors.Accent)
     )
 }
 
@@ -969,17 +1169,50 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
             fontSize = HasanDimens.TextBody,
             modifier = Modifier.padding(bottom = 6.dp)
         )
+        // Track custom sans tick marks — même raison que LabeledSlider ci-dessus (input[type=range]
+        // du mockup ligne 1030, piste continue malgré step natif).
         Slider(
             value = state.wakeWordSensitivity,
             onValueChange = callbacks.onWakeWordSensitivityChange,
             valueRange = 0.1f..1.0f,
             steps = 8,
+            thumb = { sliderThumbCircle() },
+            track = { sliderState ->
+                val fraction = ((sliderState.value - sliderState.valueRange.start) /
+                    (sliderState.valueRange.endInclusive - sliderState.valueRange.start)).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(HasanColors.Border)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction)
+                            .height(4.dp)
+                            .background(HasanColors.Accent)
+                    )
+                }
+            },
             colors = SliderDefaults.colors(
                 thumbColor = HasanColors.Accent,
                 activeTrackColor = HasanColors.Accent,
                 inactiveTrackColor = HasanColors.Border
             )
         )
+        // Graduations sous la piste — un trait par palier (9 steps = 10 positions,
+        // 0.1 à 1.0 par pas de 0.1), demande explicite pour repérer les crans disponibles.
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            repeat(10) {
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(4.dp)
+                        .background(HasanColors.BorderStrong)
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
         Row(modifier = Modifier.fillMaxWidth()) {
             Text(
                 text = "Moins sensible",
@@ -1013,11 +1246,9 @@ private fun WakeWordSection(state: SettingsUiState, callbacks: SettingsCallbacks
                 fontSize = HasanDimens.TextBody,
                 modifier = Modifier.weight(1f)
             )
-            Text(
+            HasanBadge(
                 text = if (state.batteryOptimizationIgnored) "Autorisée" else "Non autorisée",
-                color = if (state.batteryOptimizationIgnored) HasanColors.Accent else HasanColors.TextSecondary,
-                fontFamily = IBMPlexMono,
-                fontSize = HasanDimens.TextSubtitle
+                success = state.batteryOptimizationIgnored
             )
         }
         if (!state.batteryOptimizationIgnored) {
@@ -1068,28 +1299,9 @@ private fun ProfileSection(state: SettingsUiState, callbacks: SettingsCallbacks)
 
 @Composable
 private fun LogsSection(callbacks: SettingsCallbacks) {
-    SettingsSection(title = "LOGS") {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = callbacks.onOpenLogs)
-                .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Voir les logs",
-                color = HasanColors.TextPrimary,
-                fontFamily = IBMPlexSans,
-                fontSize = HasanDimens.TextSubtitle,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                text = "→",
-                color = HasanColors.Accent,
-                fontFamily = IBMPlexMono,
-                fontSize = HasanDimens.TextBody
-            )
-        }
+    Column {
+        SectionTitle("JOURNAL")
+        LinkRow(text = "Voir les logs", onClick = callbacks.onOpenLogs, trailingIcon = R.drawable.ic_arrow_r)
     }
 }
 
@@ -1104,19 +1316,9 @@ private fun AboutSection(state: SettingsUiState) {
                 .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingM),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(HasanShapes.diagonal)
-                    .background(HasanColors.Accent),
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    painter = painterResource(R.drawable.ic_hasan_brand_glyph),
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+            // .logo-badge du mockup (ligne 1063, 38px) — vrai logo Hasan (même asset que le
+            // header/drawer), pas un glyphe "M" générique sur fond plein.
+            com.hasan.v1.ui.components.BrandMark(size = 38.dp)
             Spacer(modifier = Modifier.width(HasanDimens.SpacingM))
             Column {
                 Text(text = state.aboutVersion, color = HasanColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = HasanDimens.TextTitle)
