@@ -169,41 +169,6 @@ fun HasanToggle(
 }
 
 /**
- * Badge de statut texte + couleur — jamais la couleur seule (section 2/13 du
- * brief next_update/PROMPT_CLAUDE_CODE.md). Le point coloré est un renfort
- * visuel, le texte reste la source d'information portée à TalkBack via
- * [Modifier.semantics] (contentDescription explicite plutôt que de laisser
- * TalkBack lire le point + le texte séparément).
- */
-@Composable
-fun StatusBadge(
-    text: String,
-    positive: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val color = if (positive) HasanColors.AccentLight else HasanColors.TextMutedA11y
-    Row(
-        modifier = modifier.semantics { contentDescription = text },
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(6.dp)
-                .clip(CircleShape)
-                .background(color)
-        )
-        Text(
-            text = text,
-            color = color,
-            fontFamily = IBMPlexMono,
-            fontSize = HasanDimens.TextCaption,
-            letterSpacing = 0.5.sp
-        )
-    }
-}
-
-/**
  * 7 puces coin-coupé (L M M J V S D) — sélection simple, un seul jour actif à
  * la fois (voir section 5 : "actuellement le mockup ne permet qu'un seul jour
  * sélectionné" — pas de multi-jour pour cette version). [selectedIndex] est

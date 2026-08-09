@@ -190,6 +190,21 @@ montre déjà le quoi).
   depuis le retrait de SkillClaw (DeepSeek natif renvoie `usage`
   correctement) — remis au comportement simple d'origine.
 
+### Removed
+- Code mort laissé par la migration vers Compose : `DiagonalCutShape` et les
+  formes `HasanShapes.diagonal`/`diagonalLarge` (reliquats de l'ancien mockup
+  `hasan-mockup-v2.html`, dernier usage retiré avec la reprise du mode mains
+  libres), le composable `StatusBadge` et le style `HasanMonoLabelSmall`
+  (jamais appelés), 16 drawables orphelins (fonds de bulles et boutons ronds
+  désormais dessinés via `CutCornerShape`, icônes de navigation remplacées par
+  celles retracées depuis le mockup) et 12 imports inutilisés. Le commentaire
+  d'en-tête de `Shape.kt` pointait encore vers l'ancien mockup.
+  Vérifié avant suppression : aucune résolution dynamique de ressource
+  (`getIdentifier`) dans le projet, donc l'analyse statique des références est
+  fiable. Les layouts consommés uniquement via ViewBinding (sans `R.layout.X`
+  littéral) et les imports `getValue`/`setValue` requis par la délégation
+  `by remember` sont des faux positifs classiques, explicitement conservés.
+
 ### Fixed
 - Bande de status bar (zone du poinçon caméra) laissée en `BgBase` sur tous
   les onglets : le padding d'insets, appliqué une seule fois au niveau du

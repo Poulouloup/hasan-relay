@@ -10,8 +10,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 
 /**
- * Reproduit les clip-path polygon(...) du mockup (docs/design/hasan-mockup-v2.html) —
- * un coin coupé sur chaque coin marqué. Les offsets sont en dp fixes, pas en fraction :
+ * Reproduit les clip-path polygon(...) du mockup (update/hasan-rework-mockup.html,
+ * règle .cut ligne 121-126, --notch: 12px) — un coin coupé sur chaque coin marqué.
+ * Les offsets sont en dp fixes, pas en fraction :
  * le mockup CSS utilise des tailles de coupe fixes (6px/8px/10px) indépendantes de la
  * taille du composant, pas un pourcentage — un GenericShape à coordonnées normalisées
  * donnerait une coupe qui grandit avec le composant, ce qui n'est pas le rendu voulu.
@@ -54,28 +55,6 @@ class CutCornerShape(
     }
 }
 
-/** Forme asymétrique du brand-mark / mic-btn / fh-mic — clip-path polygon(30% 0, 100% 0, 100% 70%, 70% 100%, 0 100%, 0 30%). */
-class DiagonalCutShape(private val fraction: Float = 0.30f) : Shape {
-    override fun createOutline(
-        size: Size,
-        layoutDirection: LayoutDirection,
-        density: Density
-    ): Outline {
-        val w = size.width
-        val h = size.height
-        val path = Path().apply {
-            moveTo(w * fraction, 0f)
-            lineTo(w, 0f)
-            lineTo(w, h * (1f - fraction))
-            lineTo(w * (1f - fraction), h)
-            lineTo(0f, h)
-            lineTo(0f, h * fraction)
-            close()
-        }
-        return Outline.Generic(path)
-    }
-}
-
 object HasanShapes {
     /** clip-panel — 10dp, coins top-start + bottom-end (panels settings, activity-row). */
     fun panel(cut: Dp = 10.dp) = CutCornerShape(cut, setOf(CutCorner.TopStart, CutCorner.BottomEnd))
@@ -94,9 +73,5 @@ object HasanShapes {
     fun bubbleAgent(cut: Dp = 10.dp) = CutCornerShape(cut, setOf(CutCorner.BottomStart))
     fun bubbleUser(cut: Dp = 10.dp) = CutCornerShape(cut, setOf(CutCorner.BottomEnd))
 
-    /** brand-mark / mic-btn — polygon asymétrique 30%. */
-    val diagonal = DiagonalCutShape(0.30f)
 
-    /** fh-mic (mode mains libres) — polygon asymétrique 20%. */
-    val diagonalLarge = DiagonalCutShape(0.20f)
 }
