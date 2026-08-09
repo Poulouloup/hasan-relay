@@ -30,13 +30,27 @@ private fun getMarkwon(context: Context): Markwon =
         .build()
         .also { sharedMarkwon = it }
 
+/**
+ * [textSizeSp], [textColor], [centered], [maxLines] et [bottomPaddingPx] permettent aux écrans qui ne
+ * rendent pas une bulle de chat d'ajuster le rendu sans dupliquer la configuration
+ * Markwon — cas réel : le transcript du mode mains libres (.voice-transcript du
+ * mockup, ligne 658 : font-size:20px, text-secondary, centré, tronqué à N lignes).
+ * Les valeurs par défaut reproduisent exactement le rendu des bulles de chat, donc
+ * les appels existants sont inchangés.
+ */
 @Composable
 fun MarkdownText(
     text: String,
     selectable: Boolean,
     modifier: Modifier = Modifier,
     alphaValue: Float = 1f,
-    onLongPress: (() -> Unit)? = null
+    onLongPress: (() -> Unit)? = null,
+    textSizeSp: Float = 14.5f,
+    textColor: Color = HasanColors.TextPrimary,
+    centered: Boolean = false,
+    maxLines: Int? = null,
+    ellipsize: Boolean = true,
+    bottomPaddingPx: Int = 0
 ) {
     val context = LocalContext.current
     AndroidView(
@@ -44,12 +58,34 @@ fun MarkdownText(
         factory = { ctx ->
             TextView(ctx).apply {
                 movementMethod = LinkMovementMethod.getInstance()
-                setTextColor(HasanColors.TextPrimary.toArgbInt())
-                textSize = 15f
+                // bubble-content du mockup (ligne 507) : font-size:14.5px, identique à la bulle
+                // utilisateur (ChatScreen.UserBubble) — avant : 15f ici vs 13sp côté user,
+                // écart visible donnant l'impression (à tort) de deux polices différentes.
                 typeface = ResourcesCompat.getFont(ctx, com.hasan.v1.R.font.ibm_plex_sans_regular)
             }
         },
         update = { tv ->
+            tv.setTextColor(textColor.toArgbInt())
+            tv.textSize = textSizeSp
+            // Marge basse VIDE, à l'intérieur du TextView : permet à un appelant qui
+            // applique un dégradé d'estompage de le faire retomber dans du vide plutôt
+            // que sur la dernière ligne de texte. La faire porter par le TextView (et non
+            // par un Modifier.padding côté Compose) est indispensable : le dégradé est
+            // dessiné sur la couche du composable, une marge Compose extérieure ne serait
+            // donc pas incluse dans la zone estompée.
+            tv.setPadding(0, 0, 0, bottomPaddingPx)
+            tv.gravity = if (centered) android.view.Gravity.CENTER_HORIZONTAL else android.view.Gravity.NO_GRAVITY
+            if (maxLines != null) {
+                tv.maxLines = maxLines
+                // ellipsize END tronque la dernière ligne visible avec "…". À désactiver
+                // quand l'appelant signale déjà le débordement autrement (ex: dégradé
+                // d'estompage du transcript mains-libres) — sinon le "…" apparaît au milieu
+                // du fondu, ce qui donne deux marqueurs concurrents pour la même info.
+                tv.ellipsize = if (ellipsize) android.text.TextUtils.TruncateAt.END else null
+            } else {
+                tv.maxLines = Integer.MAX_VALUE
+                tv.ellipsize = null
+            }
             tv.setTextIsSelectable(selectable)
             // TextView.setTextIsSelectable(true) réinitialise movementMethod en interne à
             // chaque appel (documented Android behavior) — l'écrasant silencieusement même
