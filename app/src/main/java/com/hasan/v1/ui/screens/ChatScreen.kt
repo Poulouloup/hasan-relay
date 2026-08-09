@@ -1,5 +1,6 @@
 package com.hasan.v1.ui.screens
 
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -8,9 +9,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -51,6 +55,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -139,10 +145,13 @@ fun ChatScreen(
     onCancelChat: () -> Unit = {},
     onAttachClick: () -> Unit = {},
     onRemoveAttachment: (UploadedAttachment) -> Unit = {},
-    onFilesClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier) {
+        // Le padding d'inset clavier (IME) est géré au niveau racine — voir
+        // MainActivity.setupDrawerRoot(), même raisonnement que pour statusBars/navigationBars :
+        // WindowInsets.ime posé ici (ComposeView imbriqué via AndroidView → Fragment →
+        // ComposeView) ne recevait pas l'inset (composer resté caché sous le clavier).
         Column(modifier = Modifier.fillMaxSize()) {
             MessageList(
                 messages = messages,
@@ -169,20 +178,6 @@ fun ChatScreen(
                 onCancelChat = onCancelChat,
                 onAttachClick = onAttachClick,
                 onRemoveAttachment = onRemoveAttachment
-            )
-        }
-        com.hasan.v1.ui.components.CutCornerIconButton(
-            onClick = onFilesClick,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(HasanDimens.SpacingM)
-                .size(HasanDimens.TouchTarget)
-        ) {
-            androidx.compose.foundation.Image(
-                painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_folder),
-                contentDescription = "Fichiers",
-                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextSecondary),
-                modifier = Modifier.size(HasanDimens.IconSmall)
             )
         }
         RingLightOverlay(tick = voiceUi.ringLightTick)
@@ -350,10 +345,13 @@ private fun MessageList(
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListStateAutoScroll(messages.size)
+    val scope = rememberCoroutineScope()
 
     LazyColumn(
         state = listState,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .reScrollToBottomOnHeightShrink(listState, messages.size, scope),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
             start = HasanDimens.SpacingL, end = HasanDimens.SpacingL, top = HasanDimens.SpacingS, bottom = HasanDimens.SpacingS
         ),
@@ -376,6 +374,7 @@ private fun rememberLazyListStateAutoScroll(itemCount: Int): LazyListState {
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val scope = rememberCoroutineScope()
     var prevCount by remember { mutableStateOf(0) }
+    var wasAtBottomBeforeIme by remember { mutableStateOf(false) }
 
     LaunchedEffect(itemCount) {
         if (itemCount == 0) { prevCount = 0; return@LaunchedEffect }
@@ -389,24 +388,83 @@ private fun rememberLazyListStateAutoScroll(itemCount: Int): LazyListState {
         }
         prevCount = itemCount
     }
+
     return listState
+}
+
+/**
+ * Détecte une réduction de la hauteur du LazyColumn (ouverture du clavier, qui fait remonter
+ * le composer via le padding IME appliqué au niveau racine — voir MainActivity.setupDrawerRoot())
+ * en observant Modifier.onSizeChanged sur le LazyColumn lui-même, PAS une API de WindowInsets :
+ * WindowInsets.ime (Compose) et ViewCompat.OnApplyWindowInsetsListener (natif) se sont montrés
+ * tous deux peu fiables ou introuvables à travers ce ComposeView imbriqué (Compose racine →
+ * AndroidView → Fragment → ComposeView, voir HasanHeader.kt pour le même problème avec
+ * statusBars/navigationBars) — observer directement la conséquence (la hauteur qui rétrécit)
+ * plutôt que la cause (l'inset) contourne complètement cette limitation d'architecture.
+ * Si on était déjà en bas du chat au moment où la hauteur diminue, re-scroll au dernier message
+ * pour qu'il reste collé juste au-dessus du composer remonté (comportement type WhatsApp/iMessage).
+ */
+private fun Modifier.reScrollToBottomOnHeightShrink(
+    listState: LazyListState,
+    itemCount: Int,
+    scope: kotlinx.coroutines.CoroutineScope
+): Modifier {
+    var prevHeight = 0
+    return this.onGloballyPositioned { coordinates ->
+        val newHeight = coordinates.size.height
+        if (prevHeight > 0 && newHeight < prevHeight && itemCount > 0) {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val wasAtBottom = lastVisible >= itemCount - 2
+            if (wasAtBottom) {
+                scope.launch {
+                    // scrollToItem(itemCount - 1) seul cale le HAUT du dernier item en haut du
+                    // viewport (comportement par défaut Compose) — si l'item est plus petit que
+                    // l'espace disponible, ça laisse un vide en dessous ET coupe la métadonnée/
+                    // les boutons d'action qui suivent dans le layout (padding de fin de
+                    // LazyColumn). Le scrollBy complémentaire pousse la liste jusqu'à ce que la
+                    // FIN du contenu (dernier pixel du dernier item + contentPadding bottom)
+                    // touche le bas du viewport — équivalent d'un scroll "vraiment tout en bas".
+                    listState.scrollToItem(itemCount - 1)
+                    val info = listState.layoutInfo
+                    val lastItem = info.visibleItemsInfo.lastOrNull { it.index == itemCount - 1 }
+                    if (lastItem != null) {
+                        val viewportBottom = info.viewportEndOffset - info.afterContentPadding
+                        val itemBottom = lastItem.offset + lastItem.size
+                        val remaining = itemBottom - viewportBottom
+                        if (remaining > 0) {
+                            listState.scrollBy(remaining.toFloat())
+                        }
+                    }
+                }
+            }
+        }
+        prevHeight = newHeight
+    }
 }
 
 private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+/** --tap-min du mockup (44dp) — hauteur commune des 3 éléments du composer-row (attach-btn, composer-input, mic-fab), qui doivent être parfaitement alignés. */
+private val ComposerRowHeight = 44.dp
+
+// bubble-content du mockup (ligne 505-513) — max-width 86% (bubble), fond BgSurface +
+// bordure fine côté agent, fond accent-deep-2 sans bordure côté user, coin coupé 10px
+// en BAS (bottom-start agent / bottom-end user), pas en haut. Remplace l'ancien style
+// "citation" (barre verticale + fond transparent) qui ne correspondait pas au mockup.
+private val BubbleMaxWidthFraction = 0.86f
+
 @Composable
 private fun UserBubble(message: Message, onLongPress: (Message) -> Unit) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .widthIn(max = 300.dp),
+        modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.End
     ) {
         Box(
             modifier = Modifier
-                .align(Alignment.End)
-                .clip(HasanShapes.bubble())
-                .background(HasanColors.BgSurface3)
+                .fillMaxWidth(BubbleMaxWidthFraction)
+                .wrapContentWidth(Alignment.End)
+                .clip(HasanShapes.bubbleUser())
+                .background(HasanColors.AccentDeep2)
                 .pointerInput(message.id) { detectTapGestures(onLongPress = { onLongPress(message) }) }
                 .padding(horizontal = HasanDimens.BubblePaddingH, vertical = HasanDimens.BubblePaddingV)
         ) {
@@ -414,8 +472,12 @@ private fun UserBubble(message: Message, onLongPress: (Message) -> Unit) {
                 text = message.content,
                 color = HasanColors.TextPrimary,
                 fontFamily = IBMPlexSans,
-                fontSize = HasanDimens.TextDisplaySmall,
-                lineHeight = 20.sp
+                // bubble-content du mockup (ligne 507) : font-size:14.5px, IDENTIQUE user/agent
+                // (pas de font-family différenciée). Avant : 13sp ici vs ~15sp côté assistant
+                // (MarkdownText) — écart visible donnant l'impression de deux polices distinctes
+                // alors que c'est la même famille (IBM Plex Sans) à une taille différente.
+                fontSize = 14.5.sp,
+                lineHeight = 22.sp
             )
         }
         Text(
@@ -438,81 +500,82 @@ private fun AssistantBubble(
 ) {
     val isPending = message.isStreaming && message.content.isBlank()
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth(BubbleMaxWidthFraction),
+        horizontalAlignment = Alignment.Start
+    ) {
         if (!isPending) {
             Text(
                 text = "HASAN",
                 color = HasanColors.Accent,
                 fontFamily = IBMPlexMono,
-                fontSize = HasanDimens.TextLabelSmall,
-                letterSpacing = 1.sp,
-                modifier = Modifier.padding(start = HasanDimens.SpacingM, bottom = 3.dp)
+                fontSize = HasanDimens.TextCaption,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.padding(bottom = HasanDimens.SpacingXs)
             )
         }
-        Row(
-            modifier = Modifier.height(IntrinsicSize.Min)
+        Box(
+            modifier = Modifier
+                .clip(HasanShapes.bubbleAgent())
+                .background(HasanColors.BgSurface)
+                .border(HasanDimens.BorderWidth, HasanColors.Border, HasanShapes.bubbleAgent())
+                .padding(horizontal = HasanDimens.BubblePaddingH, vertical = HasanDimens.BubblePaddingV)
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .width(2.dp)
-                    .background(HasanColors.Accent)
-            )
             if (isPending) {
-                PulsingDots(
-                    modifier = Modifier.padding(start = HasanDimens.SpacingM, end = HasanDimens.SpacingL, top = 3.dp, bottom = 3.dp),
-                    minAlpha = 0.3f,
-                    durationMs = 600
-                )
+                PulsingDots(minAlpha = 0.3f, durationMs = 600)
             } else {
                 MarkdownText(
                     text = message.content,
                     selectable = true,
-                    modifier = Modifier.padding(start = HasanDimens.SpacingM, end = HasanDimens.SpacingL, top = 3.dp, bottom = 3.dp),
                     onLongPress = { onLongPress(message) }
                 )
             }
         }
 
         if (!isPending) {
+            // bubble-meta du mockup (ligne 515-516) — display:flex + bubble-actions
+            // margin-left:auto : heure/meta à gauche, actions poussées à DROITE sur la
+            // MÊME ligne, sur toute la largeur de la bulle (fillMaxWidth + SpaceBetween),
+            // pas une Row de largeur naturelle qui finissait décalée sous le contenu.
             Row(
-                modifier = Modifier
-                    .padding(top = HasanDimens.SpacingXs, start = HasanDimens.SpacingXs, end = HasanDimens.SpacingXs),
+                modifier = Modifier.fillMaxWidth().padding(top = HasanDimens.SpacingXs),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = timeFormat.format(Date(message.timestamp)),
-                    color = HasanColors.TextMutedA11y,
-                    fontSize = HasanDimens.TextCaption
-                )
-                val metaText = buildMetadataText(message.metadata)
-                if (metaText != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = metaText,
+                        text = timeFormat.format(Date(message.timestamp)),
                         color = HasanColors.TextMutedA11y,
-                        fontSize = HasanDimens.TextCaption,
-                        modifier = Modifier.padding(start = 6.dp)
+                        fontSize = HasanDimens.TextCaption
+                    )
+                    val metaText = buildMetadataText(message.metadata)
+                    if (metaText != null) {
+                        Text(
+                            text = metaText,
+                            color = HasanColors.TextMutedA11y,
+                            fontSize = HasanDimens.TextCaption,
+                            modifier = Modifier.padding(start = 6.dp)
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val isPlaying = ttsPlayingMessageId == message.id
+                    MessageIconButton(
+                        icon = if (isPlaying) com.hasan.v1.R.drawable.ic_volume_off else com.hasan.v1.R.drawable.ic_replay,
+                        contentDescription = "Lire / arrêter",
+                        onClick = { onToggleTts(message) }
+                    )
+                    MessageIconButton(
+                        icon = com.hasan.v1.R.drawable.ic_copy,
+                        contentDescription = "Copier",
+                        onClick = { onCopy(message) }
+                    )
+                    MessageIconButton(
+                        icon = com.hasan.v1.R.drawable.ic_share,
+                        contentDescription = "Partager",
+                        onClick = { onShare(message) }
                     )
                 }
-                val isPlaying = ttsPlayingMessageId == message.id
-                MessageIconButton(
-                    icon = if (isPlaying) com.hasan.v1.R.drawable.ic_volume_off else com.hasan.v1.R.drawable.ic_replay,
-                    contentDescription = "Lire / arrêter",
-                    onClick = { onToggleTts(message) },
-                    modifier = Modifier.padding(start = HasanDimens.SpacingS)
-                )
-                MessageIconButton(
-                    icon = com.hasan.v1.R.drawable.ic_copy,
-                    contentDescription = "Copier",
-                    onClick = { onCopy(message) },
-                    modifier = Modifier.padding(start = 4.dp)
-                )
-                MessageIconButton(
-                    icon = com.hasan.v1.R.drawable.ic_share,
-                    contentDescription = "Partager",
-                    onClick = { onShare(message) },
-                    modifier = Modifier.padding(start = 4.dp)
-                )
             }
         }
     }
@@ -696,11 +759,27 @@ private fun InputBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(HasanColors.BgBase)
+            // Composer transparent — section 3 du brief next_update/PROMPT_CLAUDE_CODE.md :
+            // seuls les éléments à l'intérieur (chip modèle, champ, boutons) ont leur propre
+            // fond, pas de plaque pleine derrière eux. Le fond réel visible reste celui de
+            // l'écran (HasanColors.BgBase, posé par ChatScreen/Scaffold).
+            // border-top du mockup (.composer, ligne 521) — sépare visuellement le fil de
+            // messages du footer, absent avant cette correction.
+            .drawBehind {
+                drawLine(
+                    color = HasanColors.Border,
+                    start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                    end = androidx.compose.ui.geometry.Offset(size.width, 0f),
+                    strokeWidth = HasanDimens.BorderWidth.toPx()
+                )
+            }
             // start=SpacingXl (pas SpacingL) : le bouton "Joindre un fichier" débordait de
             // ~5px dans le coin arrondi physique bas-gauche du Pixel 10 (rayon réel 138px),
             // voir archive/2026-07-23-audit-boutons-masque-punch-hole-pixel10.md.
-            .padding(start = HasanDimens.SpacingXl, end = HasanDimens.SpacingL, top = HasanDimens.SpacingS, bottom = HasanDimens.SpacingM)
+            // bottom = SpacingM/2 (6dp, pas 12dp) : navigationBarsPadding() (MainActivity)
+            // réserve déjà l'espace de la barre gestuelle, ce padding ne doit qu'aérer le
+            // composer lui-même, pas doubler la marge au-dessus du home indicator.
+            .padding(start = HasanDimens.SpacingXl, end = HasanDimens.SpacingL, top = HasanDimens.SpacingS, bottom = HasanDimens.SpacingM / 2)
     ) {
         if (!inputUi.isVoiceMode && (inputUi.pendingAttachments.isNotEmpty() || inputUi.attachmentUploading)) {
             PendingAttachmentsRow(
@@ -820,20 +899,30 @@ private fun ModelPickerButton(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val label = models.firstOrNull { it.id == selectedModel }?.label ?: "Modèle par défaut"
+    // model-chip du mockup (ligne 523-527) — rectangle simple (PAS de coin coupé), fond
+    // BgSurface + bordure fine Border, texte tertiary.
     Box(modifier = modifier) {
         Row(
             modifier = Modifier
-                .clip(HasanShapes.panelSmall())
-                .background(HasanColors.BgSurface2)
+                .background(HasanColors.BgSurface)
+                .border(HasanDimens.BorderWidth, HasanColors.Border)
                 .clickable { expanded = true }
-                .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS),
+                .padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = label,
-                color = HasanColors.TextSecondary,
+                color = HasanColors.TextMutedA11y,
                 fontFamily = IBMPlexMono,
                 fontSize = HasanDimens.TextCaption
+            )
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_chevron_updown),
+                contentDescription = null,
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextMutedA11y),
+                // .icon du mockup (ligne 138) = 20px, PAS 12dp — l'icône doit dominer visuellement
+                // le texte 11.5px du model-chip, pas être quasi de la même taille.
+                modifier = Modifier.size(20.dp).padding(start = 4.dp)
             )
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -990,12 +1079,20 @@ private fun TextModeRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (!inputUi.sttVisualizerActive) {
-            CutCornerIconButton(
-                onClick = onAttachClick,
-                modifier = Modifier.size(HasanDimens.TouchTarget).padding(end = HasanDimens.SpacingS)
+            // attach-btn du mockup (ligne 539, 766) — carré DROIT, aucun clip-path (contrairement
+            // aux autres boutons icône de l'app) : fond transparent + bordure fine seulement.
+            // ComposerRowHeight (44dp = --tap-min) : même hauteur que le champ texte et le
+            // bouton mic — les 3 éléments du composer-row doivent être alignés à l'identique.
+            Box(
+                modifier = Modifier
+                    .size(ComposerRowHeight)
+                    .padding(end = HasanDimens.SpacingS)
+                    .border(HasanDimens.BorderWidth, HasanColors.Border)
+                    .clickable(onClick = onAttachClick),
+                contentAlignment = Alignment.Center
             ) {
                 androidx.compose.foundation.Image(
-                    painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_attach),
+                    painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_plus),
                     contentDescription = "Joindre un fichier",
                     colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextSecondary),
                     modifier = Modifier.size(HasanDimens.IconSmall)
@@ -1014,24 +1111,41 @@ private fun TextModeRow(
                 EqualizerBars(active = true, barHeight = 20.dp)
             }
         } else {
-            OutlinedTextField(
-                value = inputText,
-                onValueChange = onInputTextChange,
-                modifier = Modifier.weight(1f),
-                enabled = !inputUi.degraded,
-                placeholder = { Text(inputUi.hint, color = HasanColors.TextMutedA11y) },
-                textStyle = TextStyle(color = HasanColors.TextPrimary, fontSize = HasanDimens.TextDisplaySmall),
-                shape = HasanShapes.bubble(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = HasanColors.BgSurface2,
-                    unfocusedContainerColor = HasanColors.BgSurface2,
-                    disabledContainerColor = HasanColors.BgSurface2,
-                    focusedBorderColor = HasanColors.Border,
-                    unfocusedBorderColor = HasanColors.Border,
-                    disabledBorderColor = HasanColors.Border
-                ),
-                maxLines = 4
-            )
+            // composer-input du mockup (ligne 529-533) — RECTANGLE COMPLET, aucun coin coupé.
+            // BasicTextField custom (PAS OutlinedTextField Material3) : le contentPadding
+            // interne fixe de M3 empêche de contraindre la hauteur exacte à ComposerRowHeight
+            // même avec heightIn(min=), la hauteur réelle mesurée restait ~56dp (désalignement
+            // avec attach-btn/mic-fab persistant malgré le heightIn). Box englobant = bordure +
+            // fond + hauteur exacte 44dp, BasicTextField occupe tout l'espace interne.
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(ComposerRowHeight)
+                    .background(HasanColors.BgSurface)
+                    .border(HasanDimens.BorderWidth, HasanColors.Border)
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(
+                            color = HasanColors.Accent,
+                            size = androidx.compose.ui.geometry.Size(2.5.dp.toPx(), size.height)
+                        )
+                    }
+                    .padding(horizontal = HasanDimens.SpacingM),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                if (inputText.isEmpty()) {
+                    Text(inputUi.hint, color = HasanColors.TextMutedA11y, fontFamily = IBMPlexMono, fontSize = HasanDimens.TextSubtitle)
+                }
+                androidx.compose.foundation.text.BasicTextField(
+                    value = inputText,
+                    onValueChange = onInputTextChange,
+                    enabled = !inputUi.degraded,
+                    textStyle = TextStyle(color = HasanColors.TextSecondary, fontFamily = IBMPlexMono, fontSize = HasanDimens.TextSubtitle),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(HasanColors.Accent),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
         Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
         MicOrSendButton(
@@ -1047,7 +1161,7 @@ private fun TextModeRow(
 /**
  * Bouton unique à droite du champ de saisie — remplace les anciens boutons micro + envoyer
  * distincts. Bascule entre deux états selon `hasText` :
- *  - texte vide  → état "micro" (forme diagonale accent, badge crayon = indice long-press).
+ *  - texte vide  → état "micro" (mic-fab coin coupé accent, fidèle au mockup).
  *  - texte saisi → état "envoyer" (AccentIconButton, flèche haut).
  *
  * SÉCURITÉ UX : le long-press qui ouvre le mode mains libres (`onMicLongPress`) ne doit être
@@ -1072,7 +1186,7 @@ private fun MicOrSendButton(
         if (showSend) {
             AccentIconButton(
                 onClick = onSend,
-                modifier = Modifier.size(HasanDimens.TouchTarget)
+                modifier = Modifier.size(ComposerRowHeight)
             ) {
                 androidx.compose.foundation.Image(
                     painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_arrow_up),
@@ -1084,13 +1198,18 @@ private fun MicOrSendButton(
         } else {
             Box(
                 modifier = Modifier
-                    .size(HasanDimens.TouchTarget)
-                    .clip(HasanShapes.diagonal)
+                    .size(ComposerRowHeight)
+                    // mic-fab du mockup (ligne 534-537) — coin coupé fixe 8dp (2 coins),
+                    // PAS la forme diagonale asymétrique 30% proportionnelle utilisée avant.
+                    .clip(HasanShapes.panelSmall(cut = 8.dp))
                     .background(HasanColors.Accent)
                     // Long-press actif uniquement ici (état micro) — voir note de sécurité UX ci-dessus.
                     .combinedClickable(onClick = onMicClick, onLongClick = onMicLongPress),
                 contentAlignment = Alignment.Center
             ) {
+                // Pas de badge crayon superposé (absent du mockup, mic-fab ligne 534-537 est un
+                // simple bouton icône) — le long-press mode mains-libres reste fonctionnel mais
+                // sans indice visuel dédié, fidèle au mockup.
                 androidx.compose.foundation.Image(
                     painter = androidx.compose.ui.res.painterResource(
                         if (listening) com.hasan.v1.R.drawable.ic_stop_rounded else com.hasan.v1.R.drawable.ic_mic
@@ -1099,22 +1218,6 @@ private fun MicOrSendButton(
                     colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
                     modifier = Modifier.size(HasanDimens.IconMedium)
                 )
-                // Badge d'expansion discret — indique le point d'entrée mode mains libres (long-press).
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(14.dp)
-                        .padding(1.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(HasanColors.BgBase.copy(alpha = 0.85f))
-                ) {
-                    androidx.compose.foundation.Image(
-                        painter = androidx.compose.ui.res.painterResource(com.hasan.v1.R.drawable.ic_edit_small),
-                        contentDescription = null,
-                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(HasanColors.TextMutedA11y),
-                        modifier = Modifier.padding(2.dp)
-                    )
-                }
             }
         }
     }

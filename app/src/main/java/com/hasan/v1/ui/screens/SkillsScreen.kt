@@ -1,33 +1,46 @@
 package com.hasan.v1.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hasan.v1.R
 import com.hasan.v1.webui.models.SkillDetail
 import com.hasan.v1.webui.models.SkillSummary
 import com.hasan.v1.webui.models.SkillUsage
@@ -64,12 +77,62 @@ class SkillsCallbacks(
  * de MemoryScreen (voir MemoryFragment) — le hamburger est déjà affiché par
  * le HasanMinimalHeader du parent, un second dupliqué créerait deux points
  * d'ouverture du drawer sur le même écran.
+ *
+ * [showRefresh] désactivé pour le même hébergement — .tab-panel[mem-skills] du mockup
+ * (ligne 907-913) n'a pas de bouton refresh (juste big-stat + big-stat-label), le
+ * rafraîchissement de cet onglet suit celui de l'écran Mémoire parent.
  */
 @Composable
-fun SkillsScreen(state: SkillsScreenUiState, callbacks: SkillsCallbacks, showMenuHeader: Boolean = true) {
+fun SkillsScreen(
+    state: SkillsScreenUiState,
+    callbacks: SkillsCallbacks,
+    showMenuHeader: Boolean = true,
+    showRefresh: Boolean = true
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         if (showMenuHeader) HasanMinimalHeader(callbacks.onMenuClick)
-        SkillsHeader(count = state.skills.size, onRefresh = callbacks.onRefresh)
+
+        // Groupé par catégorie — le serveur trie déjà (catégorie, nom),
+        // "Autres" pour les skills non catégorisées (category == null).
+        val grouped = remember(state.skills) {
+            state.skills.groupBy { it.category ?: UNCATEGORIZED_LABEL }
+        }
+        val expandedState = remember {
+            mutableStateMapOf<String, Boolean>().apply {
+                grouped.keys.forEach { category -> put(category, false) }
+            }
+        }
+
+        var query by rememberSaveable { mutableStateOf("") }
+        // Recherche active : seules les catégories avec au moins un skill qui
+        // matche restent visibles ; à l'intérieur d'une catégorie dépliée, seuls
+        // les skills qui matchent le texte s'affichent. Les catégories restent
+        // REPLIÉES par défaut (searching ne force PAS le dépli — la recherche
+        // filtre la visibilité, pas l'état de dépli, qui reste piloté par
+        // expandedState comme en dehors de la recherche).
+        val searching = query.isNotBlank()
+        val filteredGrouped = remember(grouped, query) {
+            if (!searching) grouped
+            else grouped.mapValues { (_, skills) -> skills.filter { it.matchesQuery(query) } }
+                .filterValues { it.isNotEmpty() }
+        }
+        val matchCount = remember(filteredGrouped) { filteredGrouped.values.sumOf { it.size } }
+
+        SkillsHeader(
+            count = state.skills.size,
+            matchCount = matchCount.takeIf { searching },
+            loading = state.loading,
+            showRefresh = showRefresh,
+            onRefresh = callbacks.onRefresh
+        )
+
+        if (state.skills.isNotEmpty()) {
+            SkillsSearchField(
+                query = query,
+                onQueryChange = { query = it },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = HasanDimens.SpacingL, vertical = HasanDimens.SpacingS)
+            )
+        }
 
         state.errorMessage?.let { message ->
             SkillsErrorBanner(message = message, onDismiss = callbacks.onDismissError)
@@ -94,34 +157,34 @@ fun SkillsScreen(state: SkillsScreenUiState, callbacks: SkillsCallbacks, showMen
                 }
             }
             else -> {
-                // Groupé par catégorie — le serveur trie déjà (catégorie, nom),
-                // "Autres" pour les skills non catégorisées (category == null).
                 // Sections dépliantes, TOUTES repliées par défaut (y compris les
                 // petites catégories réelles) — la liste à plat de 838 skills
                 // était jugée trop dense pour rester lisible même en ne repliant
                 // que le gros bloc "Autres" (761/838 skills), donc repli total
                 // au premier chargement, chaque section restant un tap.
-                val grouped = remember(state.skills) {
-                    state.skills.groupBy { it.category ?: UNCATEGORIZED_LABEL }
-                }
-                val expandedState = remember {
-                    mutableStateMapOf<String, Boolean>().apply {
-                        grouped.keys.forEach { category -> put(category, false) }
-                    }
-                }
-
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().padding(horizontal = HasanDimens.SpacingL),
                     verticalArrangement = Arrangement.spacedBy(HasanDimens.SpacingS)
                 ) {
-                    grouped.forEach { (category, skillsInCategory) ->
+                    if (searching && filteredGrouped.isEmpty()) {
+                        item {
+                            Box(modifier = Modifier.fillMaxWidth().padding(HasanDimens.SpacingXxl), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "Aucune skill ne correspond à « $query »",
+                                    color = HasanColors.TextMutedA11y,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+                    filteredGrouped.forEach { (category, skillsInCategory) ->
                         val isExpanded = expandedState[category] ?: false
                         item(key = "header-$category") {
                             CategoryHeader(
                                 category = category,
                                 count = skillsInCategory.size,
                                 expanded = isExpanded,
-                                onToggle = { expandedState[category] = !isExpanded }
+                                onToggle = { expandedState[category] = !(expandedState[category] ?: false) }
                             )
                         }
                         if (isExpanded) {
@@ -132,6 +195,70 @@ fun SkillsScreen(state: SkillsScreenUiState, callbacks: SkillsCallbacks, showMen
                     }
                 }
             }
+        }
+    }
+}
+
+private fun SkillSummary.matchesQuery(query: String): Boolean =
+    name.contains(query, ignoreCase = true) || description.contains(query, ignoreCase = true)
+
+/**
+ * Champ de recherche skills — même langage visuel que .field du mockup (EditorField dans
+ * TaskEditorScreen.kt : fond bg-surface, bordure border-strong, accent-bar gauche 2.5dp,
+ * police mono 14px) puisque le mockup n'a pas d'écran de recherche de référence direct.
+ * Icône loupe à gauche du texte, croix pour vider quand une saisie est présente.
+ */
+@Composable
+private fun SkillsSearchField(query: String, onQueryChange: (String) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .heightIn(min = HasanDimens.TouchTarget)
+            .background(HasanColors.BgSurface)
+            .border(HasanDimens.BorderWidth, HasanColors.BorderStrong)
+            .drawBehind {
+                drawRect(color = HasanColors.BorderAccent, size = androidx.compose.ui.geometry.Size(2.5.dp.toPx(), size.height))
+            }
+            .padding(horizontal = HasanDimens.SpacingM, vertical = HasanDimens.SpacingS),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_search),
+            contentDescription = null,
+            colorFilter = ColorFilter.tint(HasanColors.TextMutedA11y),
+            modifier = Modifier.size(HasanDimens.IconSmall)
+        )
+        Spacer(modifier = Modifier.width(HasanDimens.SpacingS))
+        Box(modifier = Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Text(
+                    text = "Rechercher un skill…",
+                    color = HasanColors.TextMutedA11y,
+                    fontFamily = IBMPlexMono,
+                    fontSize = 14.sp
+                )
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                textStyle = LocalTextStyle.current.copy(
+                    color = HasanColors.TextPrimary,
+                    fontFamily = IBMPlexMono,
+                    fontSize = 14.sp
+                ),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(HasanColors.Accent),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        if (query.isNotEmpty()) {
+            Image(
+                painter = painterResource(R.drawable.ic_close),
+                contentDescription = "Effacer la recherche",
+                colorFilter = ColorFilter.tint(HasanColors.TextMutedA11y),
+                modifier = Modifier
+                    .size(HasanDimens.IconSmall)
+                    .clickable { onQueryChange("") }
+            )
         }
     }
 }
@@ -168,20 +295,42 @@ private fun SkillsErrorBanner(message: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun SkillsHeader(count: Int, onRefresh: () -> Unit) {
+private fun SkillsHeader(count: Int, matchCount: Int?, loading: Boolean, showRefresh: Boolean, onRefresh: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(HasanDimens.SpacingL),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column {
-            Text(
-                text = count.toString(),
-                color = HasanColors.TextPrimary,
-                fontFamily = ChakraPetch,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = HasanDimens.TextDisplay
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = count.toString(),
+                    color = HasanColors.TextPrimary,
+                    fontFamily = ChakraPetch,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = HasanDimens.TextDisplay
+                )
+                // Nombre de résultats filtrés par la recherche — badge accent à côté du
+                // compteur total, même style que HasanBadge (Paramètres) : fond translucide
+                // + bordure teintée, mono.
+                if (matchCount != null) {
+                    Box(
+                        modifier = Modifier
+                            .padding(start = HasanDimens.SpacingS)
+                            .background(HasanColors.AccentDim)
+                            .border(HasanDimens.BorderWidth, HasanColors.Accent.copy(alpha = 0.35f))
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "$matchCount résultat${if (matchCount > 1) "s" else ""}",
+                            color = HasanColors.AccentStrong,
+                            fontFamily = IBMPlexMono,
+                            fontSize = 11.sp,
+                            letterSpacing = 0.3.sp
+                        )
+                    }
+                }
+            }
             Text(
                 text = "skills installées",
                 color = HasanColors.TextMutedA11y,
@@ -189,12 +338,8 @@ private fun SkillsHeader(count: Int, onRefresh: () -> Unit) {
                 fontSize = HasanDimens.TextCaption
             )
         }
-        Box(
-            modifier = Modifier
-                .clickable(onClick = onRefresh)
-                .padding(HasanDimens.SpacingS)
-        ) {
-            Text(text = "↻", color = HasanColors.Accent, fontSize = HasanDimens.TextHeading)
+        if (showRefresh) {
+            com.hasan.v1.ui.components.RefreshIconButton(loading = loading, onClick = onRefresh, tint = HasanColors.Accent)
         }
     }
 }

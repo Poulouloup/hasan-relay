@@ -81,14 +81,11 @@ fun ToolsPermissionsScreen(
             .fillMaxSize()
             .background(HasanColors.BgBase)
     ) {
-        com.hasan.v1.ui.components.HasanMinimalHeader(callbacks.onMenuClick)
-        com.hasan.v1.ui.components.ScreenTitle("Tools & Permissions")
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(HasanDimens.BorderWidth)
-                .background(HasanColors.Border)
-        )
+        // Titre passé directement à HasanMinimalHeader (comme les autres onglets) — avant ce
+        // correctif, le titre vivait dans un ScreenTitle séparé SOUS le header, ce qui le
+        // plaçait sous la ligne border-bottom du header (HasanMinimalHeader la dessine
+        // maintenant elle-même) au lieu d'être sur la même ligne que le hamburger.
+        com.hasan.v1.ui.components.HasanMinimalHeader(callbacks.onMenuClick, title = "Tools & Permissions")
 
         LazyColumn(
             modifier = Modifier
