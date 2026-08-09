@@ -83,8 +83,16 @@ object HasanShapes {
     /** clip-panel-sm — 6dp (icon-btn, tag-pill, fh-btn). */
     fun panelSmall(cut: Dp = 6.dp) = CutCornerShape(cut, setOf(CutCorner.TopStart, CutCorner.BottomEnd))
 
-    /** msg-user / input-field — 8dp, un seul coin top-start coupé. */
+    /** input-field — 8dp, un seul coin top-start coupé. */
     fun bubble(cut: Dp = 8.dp) = CutCornerShape(cut, setOf(CutCorner.TopStart))
+
+    /**
+     * Bulles de chat (update/hasan-rework-mockup.html ligne 505-513) — 10px, un
+     * seul coin coupé, PAS le même que [bubble] : bottom-start pour l'agent
+     * (queue de bulle en bas-gauche), bottom-end pour l'utilisateur (bas-droite).
+     */
+    fun bubbleAgent(cut: Dp = 10.dp) = CutCornerShape(cut, setOf(CutCorner.BottomStart))
+    fun bubbleUser(cut: Dp = 10.dp) = CutCornerShape(cut, setOf(CutCorner.BottomEnd))
 
     /** brand-mark / mic-btn — polygon asymétrique 30%. */
     val diagonal = DiagonalCutShape(0.30f)

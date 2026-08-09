@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Icône onglet Kanban — trois colonnes, même style trait que ic_tasks_nav.xml -->
+<!-- #ic-kanban du mockup (update/hasan-rework-mockup.html ligne 687) — 3 rectangles arrondis
+     stroke 1.8, hauteurs différentes (colonnes Kanban). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -8,8 +9,16 @@
     <path
         android:fillColor="#00000000"
         android:strokeColor="@android:color/white"
-        android:strokeWidth="2"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M4,4 L4,20 M4,4 L9,4 L9,14 L4,14 M10.5,4 L15.5,4 L15.5,20 L10.5,20 M17,4 L22,4 L22,10 L17,10" />
+        android:strokeWidth="1.8"
+        android:pathData="M4,6.5 a1.5,1.5 0 0 1 1.5,-1.5 h1.5 a1.5,1.5 0 0 1 1.5,1.5 v11 a1.5,1.5 0 0 1 -1.5,1.5 h-1.5 a1.5,1.5 0 0 1 -1.5,-1.5 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="1.8"
+        android:pathData="M10,6.5 a1.5,1.5 0 0 1 1.5,-1.5 h1.5 a1.5,1.5 0 0 1 1.5,1.5 v6 a1.5,1.5 0 0 1 -1.5,1.5 h-1.5 a1.5,1.5 0 0 1 -1.5,-1.5 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="1.8"
+        android:pathData="M16,6.5 a1.5,1.5 0 0 1 1.5,-1.5 h1.5 a1.5,1.5 0 0 1 1.5,1.5 v8 a1.5,1.5 0 0 1 -1.5,1.5 h-1.5 a1.5,1.5 0 0 1 -1.5,-1.5 Z" />
 </vector>

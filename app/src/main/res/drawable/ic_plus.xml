@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- #ic-clock du mockup (update/hasan-rework-mockup.html ligne 686) — trait stroke 1.8. -->
+<!-- Bouton "joindre un fichier" du composer Chat — mockup #ic-plus (attach-btn),
+     update/hasan-rework-mockup.html ligne 766. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
     <path
-        android:fillColor="#00000000"
         android:strokeColor="@android:color/white"
-        android:strokeWidth="1.8"
+        android:strokeWidth="2"
         android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:pathData="M12,20.5 A8.5,8.5 0 1,0 12,3.5 A8.5,8.5 0 1,0 12,20.5 Z M12,12 L12,7 M12,12 L15.5,14" />
+        android:pathData="M12,5 L12,19 M5,12 L19,12" />
 </vector>

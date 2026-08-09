@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Palette principale Hasan — dark premium -->
-    <color name="hasan_bg_primary">#0A0A0A</color>
+    <!-- Fond réchauffé (rework UI 2026-07, cohérent avec HasanColors.BgBase Compose) -->
+    <color name="hasan_bg_primary">#0A0A0D</color>
     <color name="hasan_bg_secondary">#141414</color>
     <color name="hasan_bg_card">#1A1A1A</color>
     <color name="hasan_bg_input">#2A2A2A</color>
@@ -29,7 +30,8 @@
     <color name="hasan_error_bubble_border">#CC2936</color>
 
     <!-- Aliases utilisés dans le code existant (ne pas supprimer) -->
-    <color name="bg_primary">#0A0A0A</color>
+    <!-- bg_primary = android:windowBackground (themes.xml) — fond réchauffé, cohérent avec HasanColors.BgBase -->
+    <color name="bg_primary">#0A0A0D</color>
     <color name="bg_secondary">#141414</color>
     <color name="bg_card">#1A1A1A</color>
     <color name="bg_surface">#1E1E1E</color>

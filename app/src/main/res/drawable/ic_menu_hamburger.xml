@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- #ic-menu du mockup (update/hasan-rework-mockup.html ligne 683) — 3 traits stroke
+     1.8, round caps, viewBox 24, PAS des barres pleines fillColor. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
     <path
-        android:fillColor="@android:color/white"
-        android:pathData="M3,6h18v2H3V6zM3,11h18v2H3v-2zM3,16h18v2H3v-2z" />
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M3,6 L21,6 M3,12 L21,12 M3,18 L21,18" />
 </vector>
