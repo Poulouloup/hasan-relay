@@ -206,6 +206,17 @@ montre déjà le quoi).
   `by remember` sont des faux positifs classiques, explicitement conservés.
 
 ### Fixed
+- Bouton de lecture sous une bulle laissé dans l'état « arrêté » alors que le
+  message était en cours de lecture, quand le TTS est activé dans les
+  Réglages. La lecture automatique de fin de tour appelait `ttsManager.speak()`
+  directement, sans jamais renseigner `ttsPlayingMessageId` — seul un appui
+  manuel (`readAloud()`) armait cet état, or c'est lui qui décide de l'icône
+  (`ic_volume_off` en lecture, `ic_replay` sinon, voir `ChatScreen.kt`).
+  Trois autres chemins remettaient `ttsStatus` à `IDLE` sans remettre
+  `ttsPlayingMessageId` à `null` (barge-in confirmé, coupure du TTS à
+  l'ouverture du micro) : le bouton restait alors armé après l'arrêt réel de
+  la lecture, si bien que l'appui suivant relançait au lieu d'arrêter. Les
+  quatre chemins écrivent désormais les deux champs ensemble (issue #6).
 - Sessions bloquées sur « Nouvelle session » dans le drawer, jamais titrées.
   Hermes titre pourtant les sessions lui-même (LLM auxiliaire), mais ce titre
   n'arrive **jamais** par le flux de chat : il est produit dans un thread de
