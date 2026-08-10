@@ -16,6 +16,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.hasan.v1.auth.CertPinStore
 import com.hasan.v1.network.RelayConnectionStatus
+import com.hasan.v1.ui.BackHandledScreen
 import com.hasan.v1.webui.WebUiCallResult
 import com.hasan.v1.webui.WebUiClientHolder
 import com.hasan.v1.webui.WebUiMcpClient
@@ -46,7 +47,7 @@ import kotlinx.coroutines.launch
  * (création/renommage/suppression/activation) vit désormais dans MainActivity,
  * pilotée depuis le drawer.
  */
-class SettingsFragment : Fragment() {
+class SettingsFragment : Fragment(), BackHandledScreen {
 
     private val viewModel: MainViewModel by activityViewModels()
     private val settings get() = viewModel.settings
@@ -106,6 +107,17 @@ class SettingsFragment : Fragment() {
     /** Confirmation en attente (révocation d'un cert précis, ou "tout effacer" si key/fingerprint sont vides). */
     private data class PendingCertAction(val key: String?, val fingerprint: String?)
     private var pendingCertActionState by mutableStateOf<PendingCertAction?>(null)
+
+    /**
+     * Retour arrière : referme d'abord la confirmation empilée sur l'overlay
+     * certificats, puis l'overlay lui-même — dans cet ordre, sinon un retour
+     * fermerait les deux couches d'un coup.
+     */
+    override fun onBackPressed(): Boolean = when {
+        pendingCertActionState != null -> { pendingCertActionState = null; true }
+        showCertsOverlayState -> { showCertsOverlayState = false; true }
+        else -> false
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?

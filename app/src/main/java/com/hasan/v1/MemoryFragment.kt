@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import com.hasan.v1.databinding.FragmentMemoryBinding
+import com.hasan.v1.ui.BackHandledScreen
 import com.hasan.v1.ui.screens.MemoryCallbacks
 import com.hasan.v1.ui.screens.MemoryScreen
 import com.hasan.v1.ui.screens.MemoryScreenUiState
@@ -27,13 +28,29 @@ import com.hasan.v1.ui.theme.HasanTheme
  * SkillsFragment) pour désencombrer la sidebar — SkillsViewModel reste
  * inchangé, juste hébergé par ce Fragment en plus de MemoryViewModel.
  */
-class MemoryFragment : Fragment() {
+class MemoryFragment : Fragment(), BackHandledScreen {
 
     private val viewModel: MemoryViewModel by activityViewModels()
     private val skillsViewModel: SkillsViewModel by activityViewModels()
 
     private var _binding: FragmentMemoryBinding? = null
     private val binding get() = _binding!!
+
+    /**
+     * Retour arrière : referme le détail ouvert et revient à la liste. Cet
+     * onglet héberge deux écrans à profondeur propre — le détail d'un
+     * fichier mémoire et celui d'une skill (ex-onglet Skills fusionné ici) —
+     * chacun piloté par son propre ViewModel.
+     */
+    override fun onBackPressed(): Boolean = when {
+        skillsViewModel.uiState.value.selectedSkillName != null -> {
+            skillsViewModel.closeDetail(); true
+        }
+        viewModel.uiState.value.selectedFile != null -> {
+            viewModel.closeFile(); true
+        }
+        else -> false
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?

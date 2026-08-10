@@ -15,6 +15,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import com.hasan.v1.databinding.FragmentTasksBinding
+import com.hasan.v1.ui.BackHandledScreen
 import com.hasan.v1.ui.screens.TaskEditorScreen
 import com.hasan.v1.ui.screens.TasksCallbacks
 import com.hasan.v1.ui.screens.TasksScreen
@@ -30,12 +31,27 @@ import kotlinx.coroutines.launch
  * Navigation interne liste/éditeur gérée par état Compose local (pas de
  * second Fragment), même pattern MVVM que les autres fragments.
  */
-class TasksFragment : Fragment() {
+class TasksFragment : Fragment(), BackHandledScreen {
 
     private val viewModel: TasksViewModel by activityViewModels()
 
     private var _binding: FragmentTasksBinding? = null
     private val binding get() = _binding!!
+
+    // Remontés du Composable vers le Fragment (ex-`remember`) pour que le
+    // retour arrière puisse refermer l'éditeur : une valeur `remember` ne
+    // vit que dans la composition, hors de portée de onBackPressed().
+    private var editingJob by mutableStateOf<CronJob?>(null)
+    private var editorOpen by mutableStateOf(false)
+
+    /** Retour arrière : referme l'éditeur et revient à la liste des tâches. */
+    override fun onBackPressed(): Boolean {
+        if (!editorOpen) return false
+        viewModel.clearError()
+        editorOpen = false
+        editingJob = null
+        return true
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
@@ -50,8 +66,6 @@ class TasksFragment : Fragment() {
         composeView.setContent {
             HasanTheme {
                 val state by viewModel.uiState.collectAsState()
-                var editingJob by remember { mutableStateOf<CronJob?>(null) }
-                var editorOpen by remember { mutableStateOf(false) }
                 var deliveryOptions by remember { mutableStateOf<List<DeliveryOption>>(emptyList()) }
 
                 LaunchedEffect(Unit) {

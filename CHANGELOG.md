@@ -206,6 +206,25 @@ montre déjà le quoi).
   `by remember` sont des faux positifs classiques, explicitement conservés.
 
 ### Fixed
+- Retour arrière (geste de swipe ou bouton système) qui quittait l'app depuis
+  n'importe quel écran, sans confirmation. Le projet n'avait aucun
+  `OnBackPressedCallback` et pas de back stack à dépiler — les six onglets
+  sont ajoutés une fois puis show/hide (`MainActivity.showFragment`), les
+  overlays sont add/remove manuels — donc Android appliquait son défaut :
+  terminer l'Activity, d'où le retour au launcher. La hiérarchie de retour
+  est désormais reconstruite explicitement (`setupBackNavigation`), de la
+  couche la plus superficielle à la plus profonde : confirmation de sortie →
+  drawer → overlay plein écran (mains libres/Logs/Fichiers) → profondeur
+  interne à l'onglet → retour au Chat → confirmation de sortie. Seul le
+  dernier niveau quitte l'app, et jamais sans passer par `confirmQuit()`.
+  Nouveau contrat `BackHandledScreen` (`ui/`) pour la profondeur interne aux
+  onglets (éditeur de tâche, overlay certificats, détail Kanban/Mémoire/skill,
+  arborescence Fichiers) : cet état vit dans le Compose des fragments ou leurs
+  ViewModels, invisible depuis l'Activity — chaque écran est seul à savoir
+  s'il a une couche à refermer, plutôt que de faire fouiller MainActivity dans
+  ses enfants. `TasksFragment.editorOpen`/`editingJob` remontés de `remember`
+  à champs du Fragment au passage : une valeur `remember` ne vit que dans la
+  composition, hors de portée du callback de retour (issue #3).
 - Nombre de skills faux dans Réglages → Profil Hermes (11 affichés au lieu
   de 834, mesuré sur le VPS) — contournement côté app d'un bug serveur
   hermes-webui. Le `skill_count` de `GET /api/profiles` vient de

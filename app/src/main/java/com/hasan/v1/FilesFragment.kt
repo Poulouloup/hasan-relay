@@ -16,6 +16,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.hasan.v1.databinding.FragmentFilesBinding
+import com.hasan.v1.ui.BackHandledScreen
 import com.hasan.v1.ui.screens.FilesCallbacks
 import com.hasan.v1.ui.screens.FilesScreen
 import com.hasan.v1.ui.screens.FilesScreenUiState
@@ -36,9 +37,20 @@ import kotlinx.coroutines.launch
  * #fichiers. Ce que cet écran affiche est donc, en pratique, un workspace
  * global partagé, pas un espace isolé par conversation.
  */
-class FilesFragment : Fragment() {
+class FilesFragment : Fragment(), BackHandledScreen {
 
     private val viewModel: FilesViewModel by activityViewModels()
+
+    /**
+     * Retour arrière : remonte d'un niveau dans l'arborescence du workspace.
+     * À la racine (`"."`), retourne false — MainActivity referme alors
+     * l'overlay Fichiers entier et revient au Chat.
+     */
+    override fun onBackPressed(): Boolean {
+        if (viewModel.uiState.value.currentPath == ".") return false
+        viewModel.navigateUp()
+        return true
+    }
 
     private var _binding: FragmentFilesBinding? = null
     private val binding get() = _binding!!
