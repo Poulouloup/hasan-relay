@@ -366,15 +366,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val serverSessions = withContext(Dispatchers.IO) { webUiRestClient.listSessions() }
             if (serverSessions.isEmpty()) return@launch
-            val localIds = sessionDao.getAll().first().map { it.id }.toSet()
-            serverSessions.filter { it.sessionId !in localIds }.forEach { summary ->
-                sessionDao.insert(
-                    HermesSession(
-                        id = summary.sessionId,
-                        name = summary.title?.takeIf { it.isNotBlank() } ?: "Session",
-                        isActive = false
+            val locals = sessionDao.getAll().first()
+            val localById = locals.associateBy { it.id }
+            serverSessions.forEach { summary ->
+                val serverTitle = summary.title?.takeIf {
+                    it.isNotBlank() && !isPlaceholderSessionName(it)
+                }
+                val local = localById[summary.sessionId]
+                if (local == null) {
+                    sessionDao.insert(
+                        HermesSession(
+                            id = summary.sessionId,
+                            name = serverTitle ?: "Session",
+                            isActive = false
+                        )
                     )
-                )
+                } else if (serverTitle != null && isPlaceholderSessionName(local.name)) {
+                    // Rattrape les sessions déjà connues restées anonymes : le titre
+                    // Hermes peut arriver bien après la fin du tour (thread de fond
+                    // serveur), voire après la fermeture de l'app. Ne touche jamais à
+                    // un nom déjà porteur de sens — un renommage manuel reste gagnant.
+                    sessionDao.update(local.copy(name = serverTitle))
+                }
             }
         }
     }
@@ -1035,6 +1048,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // Le tour est terminé quelle que soit l'issue (Done/AppError/
                 // Cancel/StreamEnd/orphelin) — plus de run actif à annuler.
                 activeStreamId = null
+                resolveSessionTitle(effectiveSessionId, userText)
             }
         }
     }
@@ -1101,6 +1115,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Réponse utilisateur à la confirmation bridge affichée (voir requestBridgeConfirmation). */
     fun respondToBridgeConfirmation(authorized: Boolean) {
         pendingBridgeDeferred?.complete(authorized)
+    }
+
+    /**
+     * Donne un nom à une session encore anonyme, à la fin d'un tour.
+     *
+     * Hermes titre les sessions lui-même (LLM auxiliaire), mais ce titre
+     * n'arrive JAMAIS par le flux de chat : il est produit dans un thread de
+     * fond côté serveur, lancé après `done` et mutuellement exclusif avec
+     * `stream_end` — or [WebUiChatStream] ferme la connexion sur `stream_end`.
+     * L'event `title` (bien géré plus haut) n'est donc reçu qu'en de rares
+     * cas de course ; vérifié sur device, un tour complet ne le voit passer
+     * ni lui ni `title_status`.
+     *
+     * Le titre est en revanche exposé par `GET /api/sessions`, qui sert le
+     * store de sessions de Hermes (et non `state.db`, dont la colonne `title`
+     * reste vide pour ce chemin). On l'interroge donc en scrutation courte :
+     *
+     *  1. jusqu'à [TITLE_WAIT_MS] après la fin du tour, on redemande la liste
+     *     toutes les [TITLE_POLL_INTERVAL_MS] ; dès qu'un titre serveur
+     *     apparaît, on l'affiche et on le stocke ;
+     *  2. à l'échéance sans titre, repli sur le premier message de
+     *     l'utilisateur (tronqué), affiché et stocké de la même façon.
+     *
+     * Ne fait rien si la session porte déjà un nom : un titre serveur arrivé
+     * plus tôt, ou un renommage manuel, ne doit jamais être écrasé.
+     */
+    private suspend fun resolveSessionTitle(sessionId: String, firstUserText: String) {
+        val current = sessionDao.getById(sessionId) ?: return
+        if (!isPlaceholderSessionName(current.name)) return
+
+        val deadline = System.currentTimeMillis() + TITLE_WAIT_MS
+        while (System.currentTimeMillis() < deadline) {
+            delay(TITLE_POLL_INTERVAL_MS)
+            // Une session renommée à la main pendant l'attente reste prioritaire.
+            val latest = sessionDao.getById(sessionId) ?: return
+            if (!isPlaceholderSessionName(latest.name)) return
+
+            val serverTitle = withContext(Dispatchers.IO) { webUiRestClient.listSessions() }
+                .firstOrNull { it.sessionId == sessionId }
+                ?.title
+                ?.takeIf { it.isNotBlank() && !isPlaceholderSessionName(it) }
+            if (serverTitle != null) {
+                applySessionTitle(sessionId, serverTitle)
+                LatencyLog.mark("TITLE_FROM_SERVER", sessionId, serverTitle)
+                return
+            }
+        }
+
+        // Échéance atteinte : repli sur le premier message, jamais sur rien.
+        val fallback = firstUserText.trim().take(SESSION_TITLE_MAX_LEN).takeIf { it.isNotBlank() }
+            ?: return
+        val latest = sessionDao.getById(sessionId) ?: return
+        if (!isPlaceholderSessionName(latest.name)) return
+        applySessionTitle(sessionId, fallback)
+        LatencyLog.mark("TITLE_FALLBACK_USER_TEXT", sessionId, fallback)
+    }
+
+    /** Écrit le nom de session en base (drawer) et le titre de la conversation associée. */
+    private suspend fun applySessionTitle(sessionId: String, title: String) {
+        sessionDao.getById(sessionId)?.let { sessionDao.update(it.copy(name = title)) }
+        if (currentConversationId >= 0) {
+            conversationDao.getById(currentConversationId)?.let { conv ->
+                if (conv.sessionId == sessionId) conversationDao.update(conv.copy(title = title))
+            }
+        }
     }
 
     /** Crée une nouvelle conversation en DB, ou réutilise la conversation reprise. */
@@ -1528,6 +1607,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val TAG = "MainViewModel"
         private val SENTENCE_SEPARATORS = listOf(". ", "! ", "? ", ", ")
         private const val MAX_TOKENS_BEFORE_SPEAK = 5
+
+        /** Fenêtre d'attente d'un titre serveur après la fin d'un tour (voir resolveSessionTitle). */
+        private const val TITLE_WAIT_MS = 10_000L
+        private const val TITLE_POLL_INTERVAL_MS = 1_500L
+        private const val SESSION_TITLE_MAX_LEN = 80
+
+        /**
+         * Noms qui signifient "pas encore titrée" et peuvent donc être
+         * remplacés. Couvre les placeholders posés par l'app
+         * ("Nouvelle session", "Session") et ceux que le serveur renvoie
+         * pour une session anonyme ("Untitled", "New Chat", "CLI Session",
+         * observés dans GET /api/sessions) — sans quoi le repli n'écraserait
+         * jamais un titre serveur qui n'en est pas un.
+         */
+        private val PLACEHOLDER_SESSION_NAMES = setOf(
+            "nouvelle session", "session", "untitled", "new chat", "cli session"
+        )
+
+        fun isPlaceholderSessionName(name: String?): Boolean {
+            val trimmed = name?.trim().orEmpty()
+            return trimmed.isEmpty() || trimmed.lowercase() in PLACEHOLDER_SESSION_NAMES
+        }
     }
 }
 
