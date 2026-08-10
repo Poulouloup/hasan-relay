@@ -206,6 +206,23 @@ montre déjà le quoi).
   `by remember` sont des faux positifs classiques, explicitement conservés.
 
 ### Fixed
+- Nombre de skills faux dans Réglages → Profil Hermes (11 affichés au lieu
+  de 834, mesuré sur le VPS) — contournement côté app d'un bug serveur
+  hermes-webui. Le `skill_count` de `GET /api/profiles` vient de
+  `_compute_profile_skills_stats` (`api/profiles.py`), qui ne scanne que
+  `<profil>/skills` et ignore les `external_dirs` déclarés dans
+  `config.yaml` (ici `~/.agents/skills` et `~/.hermes/hermes-agent/skills`,
+  soit 827 des 834 skills réelles). `GET /api/skills`, lui, parcourt bien
+  tous les répertoires de recherche : les deux écrans de l'app affichaient
+  donc des nombres incompatibles pour le même profil. `loadHermesProfiles()`
+  écrase désormais le compte du profil **actif** avec celui de
+  `WebUiSkillsClient.listSkills()`, déjà utilisé par l'onglet Skills.
+  Correction volontairement limitée au profil actif — `/api/skills` est
+  relatif au profil courant côté serveur, son total ne dit rien des autres ;
+  et dégradation silencieuse sur échec (valeur serveur conservée). Le bug
+  serveur reste entier : tout autre client de `/api/profiles`, dont le
+  frontend web de hermes-webui, continue d'afficher le compte sous-évalué
+  (issue #4).
 - Bande de status bar (zone du poinçon caméra) laissée en `BgBase` sur tous
   les onglets : le padding d'insets, appliqué une seule fois au niveau du
   `AndroidView` racine (`MainActivity`), réservait bien la place de la status

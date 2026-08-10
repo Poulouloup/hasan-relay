@@ -16,9 +16,11 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.hasan.v1.auth.CertPinStore
 import com.hasan.v1.network.RelayConnectionStatus
+import com.hasan.v1.webui.WebUiCallResult
 import com.hasan.v1.webui.WebUiClientHolder
 import com.hasan.v1.webui.WebUiMcpClient
 import com.hasan.v1.webui.WebUiProfilesClient
+import com.hasan.v1.webui.WebUiSkillsClient
 import com.hasan.v1.webui.models.HermesProfile
 import com.hasan.v1.webui.models.McpServer
 import com.hasan.v1.ui.components.CertificatesOverlay
@@ -51,6 +53,7 @@ class SettingsFragment : Fragment() {
     private val webUiRestClient by lazy { WebUiClientHolder.get(requireContext()) }
     private val profilesClient by lazy { WebUiProfilesClient(webUiRestClient) }
     private val mcpClient by lazy { WebUiMcpClient(webUiRestClient) }
+    private val skillsClient by lazy { WebUiSkillsClient(webUiRestClient) }
 
     // ─────────────────────────── État Compose ──────────────────────────────
     // mutableStateOf plutôt que StateFlow ici : SettingsManager (SharedPreferences)
@@ -357,9 +360,35 @@ class SettingsFragment : Fragment() {
 
     // ─────────────────────────── Profil Hermes ─────────────────────────────
 
+    /**
+     * Charge les profils, puis corrige le `skill_count` du profil actif à
+     * partir de GET /api/skills.
+     *
+     * Contournement d'un bug serveur (hermes-webui) : le `skill_count` de
+     * GET /api/profiles est calculé par `_compute_profile_skills_stats`
+     * (api/profiles.py), qui ne scanne que `<profil>/skills` et ignore les
+     * `external_dirs` déclarés dans config.yaml. GET /api/skills, lui,
+     * parcourt bien tous les répertoires de recherche — les deux écrans
+     * affichaient donc des nombres incompatibles pour le même profil
+     * (11 en Réglages contre 834 dans Skills, mesuré sur le VPS).
+     *
+     * Ne corrige que le profil ACTIF : /api/skills est relatif au profil
+     * courant côté serveur, son total ne dit rien des autres profils. Les
+     * profils inactifs gardent la valeur serveur, faute de mieux — un
+     * nombre sous-évalué reste préférable à un nombre emprunté à un autre
+     * profil. En cas d'échec de l'appel, on conserve simplement la valeur
+     * serveur (l'écran reste fonctionnel, cf. issue #4).
+     */
     private fun loadHermesProfiles() {
         lifecycleScope.launch {
-            hermesProfilesState = profilesClient.listProfiles()
+            val profiles = profilesClient.listProfiles()
+            hermesProfilesState = profiles
+            if (profiles.none { it.isActive }) return@launch
+            val realCount = (skillsClient.listSkills() as? WebUiCallResult.Ok)?.value?.size
+                ?: return@launch
+            hermesProfilesState = profiles.map {
+                if (it.isActive) it.copy(skillCount = realCount) else it
+            }
         }
     }
 
