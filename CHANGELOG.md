@@ -206,6 +206,33 @@ montre déjà le quoi).
   `by remember` sont des faux positifs classiques, explicitement conservés.
 
 ### Fixed
+- Sessions bloquées sur « Nouvelle session » dans le drawer, jamais titrées.
+  Hermes titre pourtant les sessions lui-même (LLM auxiliaire), mais ce titre
+  n'arrive **jamais** par le flux de chat : il est produit dans un thread de
+  fond côté serveur, lancé après `done` et mutuellement exclusif avec
+  `stream_end` — or `WebUiChatStream` ferme la connexion sur `stream_end`.
+  Vérifié sur device : un tour complet ne voit passer ni `title` ni
+  `title_status`. Le titre est en revanche exposé par `GET /api/sessions`
+  (qui sert le store de sessions Hermes, et non `state.db` dont la colonne
+  `title` reste vide pour ce chemin). Nouveau `resolveSessionTitle()` :
+  à la fin d'un tour sur une session anonyme, scrutation de `/api/sessions`
+  toutes les 1,5 s pendant 10 s max ; dès qu'un titre serveur apparaît il est
+  affiché et stocké, et à l'échéance sans titre on retombe sur le premier
+  message de l'utilisateur (tronqué à 80 caractères) — une session finit donc
+  toujours nommée. `syncSessionsFromServer()` rattrape en plus les sessions
+  **déjà connues** restées anonymes (il ne traitait que les nouvelles) : le
+  titre serveur peut arriver après la fermeture de l'app. Un garde-fou commun,
+  `isPlaceholderSessionName()`, empêche d'écraser un nom déjà porteur de sens
+  — titre serveur arrivé plus tôt ou renommage manuel de l'utilisateur ; il
+  couvre aussi les placeholders serveur (`Untitled`, `New Chat`,
+  `CLI Session`). Le repli utilise `userText` et non `lastUserText`, qu'un
+  `/steer` écrase en cours de tour (issue #2).
+  Cause racine côté serveur, hors de ce repo, corrigée séparément dans
+  `~/.hermes/config.yaml` : `auxiliary.title_generation` déclarait
+  `provider: deepseek` avec `model: meta/llama-3.2-3b-instruct` (un modèle
+  NVIDIA NIM), d'où un HTTP 400 avalé par le thread de fond et 0 session
+  `api_server` titrée sur 74. Le correctif app fonctionne indépendamment :
+  sans titre serveur, le repli prend le relais.
 - Retour arrière (geste de swipe ou bouton système) qui quittait l'app depuis
   n'importe quel écran, sans confirmation. Le projet n'avait aucun
   `OnBackPressedCallback` et pas de back stack à dépiler — les six onglets
