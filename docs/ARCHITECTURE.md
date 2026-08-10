@@ -20,8 +20,44 @@ feature (voir `.claude/CLAUDE.md`).
 ## Pipeline vocal
 
 _À documenter : wake word (ONNX local) → STT (Android natif) → Hermes
-(SSE/WebSocket) → TTS. Voir MainViewModel.kt, WakeWordPipeline.kt,
+(SSE/WebSocket). Voir MainViewModel.kt, WakeWordPipeline.kt,
 HassanWakeWordService.kt._
+
+### TTS (synthèse vocale)
+
+`HassanTtsManager` est une façade qui implémente `TtsEngine` et délègue à l'un
+des trois moteurs, selon `SettingsManager.ttsProvider` :
+
+| Provider | Moteur | Réseau | Clé | Remarque |
+|---|---|---|---|---|
+| `native` | `AndroidNativeTtsEngine` | non | non | `TextToSpeech` système, multi-moteur |
+| `edge` | `EdgeTtsEngine` | oui | non | endpoint non documenté de Microsoft Edge |
+| `gemini` | `GeminiTtsEngine` | oui | **oui** | API Google officielle, modèles en preview |
+
+L'instance native est unique et permanente : elle sert à la fois de provider
+normal et de **secours**. Les deux moteurs cloud sont créés/libérés à la
+demande — un seul existe à la fois, celui du provider actif.
+
+**Fallback** — si le moteur cloud actif ne peut pas parler (réseau coupé, clé
+Gemini absente, quota dépassé, endpoint Edge cassé), `speak()` bascule sur le
+natif pour cette phrase et notifie via `onFallback`, **sans** modifier le
+réglage persisté : au `speak()` suivant, le moteur choisi est retenté. L'app
+n'est donc jamais muette à cause d'un service externe.
+
+**Pipeline commun aux moteurs cloud** — les chunks reçus (un par phrase) sont
+synthétisés en pipeline : la synthèse du chunk N+1 démarre pendant que N est
+déjà en file de lecture. La lecture est gapless via `VoicePlayer` (Media3
+ExoPlayer), qui enchaîne les fichiers de sa playlist native. Un cache LRU des
+3 derniers audios évite de régénérer l'audio d'un message relu.
+
+**Spécificité Gemini** — l'API renvoie du **PCM brut en base64** (24 kHz, mono,
+16 bits signés little-endian) et non un fichier audio jouable. ExoPlayer ne
+lisant pas de PCM nu, `writeWavFile()` lui fabrique un en-tête WAV de 44 octets
+avant lecture. La clé API est stockée chiffrée
+(`SettingsManager.geminiApiKey`) et lue à chaque synthèse plutôt que capturée à
+la construction, pour qu'une saisie tardive soit prise en compte sans changer
+de provider. Elle est transmise en header `x-goog-api-key` et non en query
+string, pour ne pas se retrouver dans les logs d'accès.
 
 ## Bridge & capabilities
 

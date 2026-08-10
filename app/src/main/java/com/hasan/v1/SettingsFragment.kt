@@ -63,6 +63,7 @@ class SettingsFragment : Fragment(), BackHandledScreen {
 
 
     private var ttsProviderState by mutableStateOf(SettingsManager.DEFAULT_TTS_PROVIDER)
+    private var geminiApiKeyState by mutableStateOf("")
     private var ttsSubOptionsState by mutableStateOf<List<Pair<String, String>>>(emptyList())
     private var ttsSelectedSubOptionState by mutableStateOf("")
     private var nativeEnginesState by mutableStateOf<List<TtsEngineOption>>(emptyList())
@@ -142,6 +143,7 @@ class SettingsFragment : Fragment(), BackHandledScreen {
                             relayDeviceLabel = relayDeviceLabelState,
                             ttsProvider = ttsProviderState,
                             ttsProviderSubOptions = ttsSubOptionsState,
+                            geminiApiKey = geminiApiKeyState,
                             ttsSelectedSubOption = ttsSelectedSubOptionState,
                             nativeEngines = nativeEnginesState,
                             nativeSelectedEngine = nativeSelectedEngineState,
@@ -186,6 +188,10 @@ class SettingsFragment : Fragment(), BackHandledScreen {
                                 ttsProviderState = provider
                                 viewModel.changeTtsProvider(provider)
                                 populateTtsSubSelector(provider)
+                            },
+                            onGeminiApiKeyChange = { key ->
+                                geminiApiKeyState = key
+                                settings.geminiApiKey = key
                             },
                             onTtsSubOptionChange = { value -> onTtsSubOptionSelected(value) },
                             onNativeEngineChange = { enginePkg -> onNativeEngineSelected(enginePkg) },
@@ -291,18 +297,37 @@ class SettingsFragment : Fragment(), BackHandledScreen {
         relayDeviceLabelState = settings.relayDeviceLabel
 
         ttsProviderState = settings.ttsProvider.ifBlank { viewModel.getCurrentTtsProvider() }
+        geminiApiKeyState = settings.geminiApiKey
     }
 
     // ─────────────────────────── Voix TTS (natif Android / Edge TTS) ───────
 
     /** Reproduit populateProviderSubSelector/populateEdgeTtsVoiceSelector/populateNativeEngineSelector en Compose réactif. */
     private fun populateTtsSubSelector(provider: String) {
-        if (provider == SettingsManager.TTS_PROVIDER_EDGE) {
-            populateEdgeTtsVoiceOptions()
-            nativeEnginesState = emptyList()
-        } else {
-            populateNativeEngineOptions()
+        when (provider) {
+            SettingsManager.TTS_PROVIDER_EDGE -> {
+                populateEdgeTtsVoiceOptions()
+                nativeEnginesState = emptyList()
+            }
+            SettingsManager.TTS_PROVIDER_GEMINI -> {
+                populateGeminiTtsVoiceOptions()
+                nativeEnginesState = emptyList()
+            }
+            else -> populateNativeEngineOptions()
         }
+    }
+
+    /**
+     * Voix Gemini — noms nus (Kore, Puck…), sans locale : elles sont toutes
+     * multilingues, la langue vient du texte. Pas de libellé enrichi comme pour
+     * Edge, dont les noms encodent la locale (voir buildEdgeVoiceLabel).
+     */
+    private fun populateGeminiTtsVoiceOptions() {
+        val voices = SettingsManager.GEMINI_TTS_VOICES
+        val currentVoice = settings.ttsVoice
+        ttsSubOptionsState = voices.map { it to it }
+        ttsSelectedSubOptionState =
+            if (voices.contains(currentVoice)) currentVoice else GeminiTtsEngine.DEFAULT_VOICE
     }
 
     private fun populateEdgeTtsVoiceOptions() {

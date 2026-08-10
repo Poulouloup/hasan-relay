@@ -43,11 +43,24 @@ class SettingsManager(context: Context) {
         )
         const val DEFAULT_TTS_VOICE = "fr-FR-HenriNeural"
 
-        private const val KEY_ROOM_DB_PASSPHRASE = "room_db_passphrase"
+        /**
+         * Voix Gemini TTS. L'API en expose une trentaine, toutes multilingues
+         * (la langue est déduite du texte, pas de la voix — contrairement aux
+         * voix Edge, nommées par locale). Sélection des plus distinctes, pour ne
+         * pas noyer le sélecteur des Réglages.
+         */
+        val GEMINI_TTS_VOICES = listOf(
+            "Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"
+        )
 
-        // Provider TTS : "native" (Android TextToSpeech système) ou "edge" (Edge TTS cloud gratuit)
+        private const val KEY_ROOM_DB_PASSPHRASE = "room_db_passphrase"
+        private const val KEY_GEMINI_API_KEY = "gemini_api_key"
+
+        // Provider TTS : "native" (Android TextToSpeech système), "edge" (Edge TTS
+        // cloud gratuit sans clé) ou "gemini" (API Google officielle, clé requise)
         const val TTS_PROVIDER_NATIVE = "native"
         const val TTS_PROVIDER_EDGE   = "edge"
+        const val TTS_PROVIDER_GEMINI = "gemini"
         const val DEFAULT_TTS_PROVIDER = TTS_PROVIDER_NATIVE
     }
 
@@ -207,6 +220,16 @@ class SettingsManager(context: Context) {
      * createEncryptedPrefs() pour le cas de reset (perte de clé acceptée, déjà le
      * comportement existant pour tous les autres secrets de ce fichier).
      */
+    /**
+     * Clé API Gemini (TTS) — secret, donc EncryptedSharedPreferences et non les
+     * préférences normales, comme les tokens relay (voir .claude/rules/architecture.md).
+     * Chaîne vide tant qu'elle n'est pas configurée : [GeminiTtsEngine] lève alors
+     * une erreur explicite et le manager bascule sur le TTS natif.
+     */
+    var geminiApiKey: String
+        get() = encryptedPrefs.getString(KEY_GEMINI_API_KEY, "") ?: ""
+        set(value) = encryptedPrefs.edit().putString(KEY_GEMINI_API_KEY, value.trim()).apply()
+
     fun getOrCreateRoomDbKey(): ByteArray {
         val existing = encryptedPrefs.getString(KEY_ROOM_DB_PASSPHRASE, null)
         if (existing != null) return android.util.Base64.decode(existing, android.util.Base64.NO_WRAP)

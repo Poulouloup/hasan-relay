@@ -82,6 +82,8 @@ data class SettingsUiState(
     val ttsProvider: String,
     val ttsProviderSubOptions: List<Pair<String, String>>,
     val ttsSelectedSubOption: String,
+    /** Clé API Gemini TTS — vide tant qu'elle n'est pas saisie (voir SettingsManager.geminiApiKey). */
+    val geminiApiKey: String,
     val nativeEngines: List<TtsEngineOption>,
     val nativeSelectedEngine: String,
     val showNativeEngineSelector: Boolean,
@@ -119,6 +121,7 @@ class SettingsCallbacks(
     /** Intercepte l'édition d'un champ secret (mot de passe webui, code pairing) — authentification biométrique avant [onSuccess]. */
     val onAuthRequiredForSecretEdit: (onSuccess: () -> Unit) -> Unit,
     val onTtsProviderChange: (String) -> Unit,
+    val onGeminiApiKeyChange: (String) -> Unit,
     val onTtsSubOptionChange: (String) -> Unit,
     val onNativeEngineChange: (String) -> Unit,
     val onTtsEnabledChange: (Boolean) -> Unit,
@@ -913,8 +916,44 @@ private fun VoiceSection(state: SettingsUiState, callbacks: SettingsCallbacks) {
             selected = state.ttsProvider == com.hasan.v1.SettingsManager.TTS_PROVIDER_EDGE,
             onClick = { callbacks.onTtsProviderChange(com.hasan.v1.SettingsManager.TTS_PROVIDER_EDGE) }
         )
+        Spacer(modifier = Modifier.height(6.dp))
+        ProviderChoiceRow(
+            label = "Voix Gemini TTS (en ligne, clé requise)",
+            selected = state.ttsProvider == com.hasan.v1.SettingsManager.TTS_PROVIDER_GEMINI,
+            onClick = { callbacks.onTtsProviderChange(com.hasan.v1.SettingsManager.TTS_PROVIDER_GEMINI) }
+        )
 
-        if (state.ttsProvider == com.hasan.v1.SettingsManager.TTS_PROVIDER_EDGE) {
+        if (state.ttsProvider == com.hasan.v1.SettingsManager.TTS_PROVIDER_GEMINI) {
+            Divider()
+            // Champ de saisie de la clé — masqué comme un mot de passe, et
+            // seulement visible quand Gemini est sélectionné (inutile sinon).
+            SettingsEditableRow(
+                label = "Clé API Gemini",
+                value = state.geminiApiKey,
+                onValueChange = callbacks.onGeminiApiKeyChange,
+                placeholder = "AIza…",
+                isSecret = true,
+                showDivider = false
+            )
+            Text(
+                text = if (state.geminiApiKey.isBlank()) {
+                    "Clé absente — la lecture bascule sur la voix Android. " +
+                        "Créez-en une gratuitement sur aistudio.google.com/apikey."
+                } else {
+                    "Modèles en preview : quotas du niveau gratuit ajustables sans " +
+                        "préavis. En cas d'échec, la voix Android prend le relais."
+                },
+                color = HasanColors.TextMutedA11y,
+                fontSize = HasanDimens.TextLabelSmall,
+                modifier = Modifier.padding(top = 6.dp, bottom = HasanDimens.SpacingS)
+            )
+            Divider()
+            RadioOptionGroup(
+                options = state.ttsProviderSubOptions,
+                selected = state.ttsSelectedSubOption,
+                onSelect = callbacks.onTtsSubOptionChange
+            )
+        } else if (state.ttsProvider == com.hasan.v1.SettingsManager.TTS_PROVIDER_EDGE) {
             // Sous-sélecteur voix Edge TTS
             Divider()
             RadioOptionGroup(

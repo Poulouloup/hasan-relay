@@ -69,6 +69,7 @@ Pairing with the relay is done once via QR code (`QrScannerActivity` → `Pairin
 - **Clarify support** — Hermes can ask a clarifying question mid-turn (with choices or free text) before continuing
 - **Device bridge with confirmation** — Hermes can request sensitive device actions (SMS, location, contacts); the app shows an Authorize/Deny dialog before executing
 - **On-device TTS** — local speech synthesis, engine and voice selection
+- **Cloud TTS providers** — Edge TTS (free, no key) and Gemini TTS (official Google API, free-tier key required); both fall back to the on-device voice on failure
 - **Dark premium UI** — 100% Jetpack Compose (Chat / Activity / Settings), cut-corner design system, wave animations
 - **Room persistence** — full conversation history with sessions
 - **Sessions** — multiple Hermes sessions, auto-titled from the first message, rename/delete from the drawer
@@ -156,6 +157,7 @@ hasanv1/
 | Dark premium Compose UI (Chat / Activity / Settings) | ✅ |
 | Chat bubbles + per-message TTS replay | ✅ |
 | On-device TTS (native Android, multi-engine) | ✅ |
+| Cloud TTS (Edge TTS, Gemini TTS) | ✅ |
 | Native Android STT | ✅ |
 | WebSocket relay (single persistent connection, TOFU) | ✅ |
 | QR pairing flow | ✅ |

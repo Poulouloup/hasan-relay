@@ -7,6 +7,24 @@ montre déjà le quoi).
 ## [Unreleased]
 
 ### Added
+- Troisième provider TTS : **Gemini TTS** (`GeminiTtsEngine`), aux côtés du
+  natif Android et d'Edge. API Google officielle (contrairement à Edge, adossé
+  à un endpoint non documenté), 8 voix multilingues — la langue vient du texte,
+  pas de la voix. Contrepartie : une **clé API est obligatoire**, stockée
+  chiffrée (`SettingsManager.geminiApiKey`, `EncryptedSharedPreferences` comme
+  les tokens relay) et saisie dans Réglages → Voix, champ visible seulement
+  quand ce provider est sélectionné. Gratuit via le free tier AI Studio (10
+  req/min, 500 req/jour, sans carte), mais les modèles TTS sont en preview :
+  quotas ajustables sans préavis côté Google. Réutilise l'architecture
+  d'`EdgeTtsEngine` (pipeline de chunks, lecture gapless via `VoicePlayer`,
+  cache LRU de 3 audios, fallback natif signalé par `onFallbackTriggered`) —
+  clé absente, quota dépassé ou réseau coupé basculent sur la voix Android
+  plutôt que de laisser l'app muette, sans modifier le réglage persisté.
+  Spécificité Gemini : la réponse est du **PCM brut base64** (24 kHz, mono,
+  16 bits) et non un fichier audio jouable ; `writeWavFile()` lui fabrique un
+  en-tête WAV, ExoPlayer ne lisant pas de PCM nu. La clé est lue à chaque
+  synthèse (lambda, pas valeur capturée) pour être prise en compte sans
+  rebasculer de provider (issue #6).
 - Réveil FCM (Firebase Cloud Messaging) data-only pour les notifications
   proactives — le canal `proactive` existant (WebSocket persistant) ne
   survit pas de façon fiable quand l'app est fermée/en veille (pas de

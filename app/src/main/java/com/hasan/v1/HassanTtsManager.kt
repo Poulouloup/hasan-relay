@@ -3,20 +3,23 @@ package com.hasan.v1
 import android.content.Context
 
 /**
- * Façade TTS — délègue à [AndroidNativeTtsEngine] (hors ligne) ou [EdgeTtsEngine]
- * (cloud, endpoint gratuit non officiel de Microsoft Edge) selon
- * [SettingsManager.ttsProvider].
+ * Façade TTS — délègue à l'un des trois moteurs selon [SettingsManager.ttsProvider] :
+ * [AndroidNativeTtsEngine] (hors ligne), [EdgeTtsEngine] (cloud, endpoint gratuit
+ * non officiel de Microsoft Edge, sans clé) ou [GeminiTtsEngine] (API Google
+ * officielle, clé requise, modèles en preview).
  *
  * L'instance [AndroidNativeTtsEngine] est unique et permanente (une seule init
  * TextToSpeech pour toute la durée de vie du manager) — elle sert à la fois de
  * provider "natif" normal et de secours de fallback, pour que les allers-retours
  * entre providers dans les Réglages ne recréent jamais TextToSpeech inutilement.
- * Seul [EdgeTtsEngine] est créé/libéré dynamiquement selon le provider actif.
+ * Les deux moteurs cloud sont créés/libérés dynamiquement : un seul existe à la
+ * fois, celui du provider actif.
  *
- * Si Edge TTS est sélectionné mais échoue au moment de parler (pas de réseau,
- * endpoint bloqué/changé côté Microsoft), [speak] bascule automatiquement sur le TTS
- * natif pour cette phrase et notifie l'appelant via [onFallback], sans changer le
- * réglage persisté — au prochain `speak()`, Edge TTS est retenté.
+ * Si un moteur cloud est sélectionné mais échoue au moment de parler (pas de
+ * réseau, endpoint Microsoft changé, clé Gemini absente/invalide, quota dépassé),
+ * [speak] bascule automatiquement sur le TTS natif pour cette phrase et notifie
+ * l'appelant via [onFallback], sans changer le réglage persisté — au prochain
+ * `speak()`, le moteur choisi est retenté.
  */
 class HassanTtsManager(private val context: Context) : TtsEngine {
 
@@ -24,6 +27,7 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
 
     private val nativeEngine = AndroidNativeTtsEngine(context)
     private var edgeEngine: EdgeTtsEngine? = null
+    private var geminiEngine: GeminiTtsEngine? = null
     private var provider: String = settings.ttsProvider
 
     override var onSpeakingStart: (() -> Unit)? = null
@@ -31,6 +35,7 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
             field = value
             nativeEngine.onSpeakingStart = value
             edgeEngine?.onSpeakingStart = value
+            geminiEngine?.onSpeakingStart = value
         }
 
     override var onAllSpeakingDone: (() -> Unit)? = null
@@ -38,6 +43,7 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
             field = value
             nativeEngine.onAllSpeakingDone = value
             edgeEngine?.onAllSpeakingDone = value
+            geminiEngine?.onAllSpeakingDone = value
         }
 
     /** Notifié quand une synthèse Edge TTS échoue et bascule sur le TTS natif. */
@@ -46,7 +52,10 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
     init {
         nativeEngine.onSpeakingStart = onSpeakingStart
         nativeEngine.onAllSpeakingDone = onAllSpeakingDone
-        if (provider == SettingsManager.TTS_PROVIDER_EDGE) ensureEdgeEngine()
+        when (provider) {
+            SettingsManager.TTS_PROVIDER_EDGE -> ensureEdgeEngine()
+            SettingsManager.TTS_PROVIDER_GEMINI -> ensureGeminiEngine()
+        }
     }
 
     private fun ensureEdgeEngine(): EdgeTtsEngine =
@@ -58,8 +67,28 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
             edgeEngine = it
         }
 
+    /**
+     * La clé est lue à chaque synthèse (lambda, pas valeur capturée) : l'utilisateur
+     * peut la saisir dans les Réglages après la création du moteur, sans avoir à
+     * rebasculer de provider pour que le moteur la voie.
+     */
+    private fun ensureGeminiEngine(): GeminiTtsEngine =
+        geminiEngine ?: GeminiTtsEngine(context) { settings.geminiApiKey }.also {
+            it.setVoice(settings.ttsVoice.takeIf { v ->
+                v in SettingsManager.GEMINI_TTS_VOICES
+            } ?: GeminiTtsEngine.DEFAULT_VOICE)
+            it.onFallbackTriggered = ::handleFallback
+            it.onSpeakingStart = onSpeakingStart
+            it.onAllSpeakingDone = onAllSpeakingDone
+            geminiEngine = it
+        }
+
     private val activeEngine: TtsEngine
-        get() = if (provider == SettingsManager.TTS_PROVIDER_EDGE) ensureEdgeEngine() else nativeEngine
+        get() = when (provider) {
+            SettingsManager.TTS_PROVIDER_EDGE -> ensureEdgeEngine()
+            SettingsManager.TTS_PROVIDER_GEMINI -> ensureGeminiEngine()
+            else -> nativeEngine
+        }
 
     private fun handleFallback(reason: String) {
         onFallback?.invoke(reason)
@@ -73,11 +102,19 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
     fun changeProvider(newProvider: String) {
         if (newProvider == provider) return
         provider = newProvider
-        if (newProvider == SettingsManager.TTS_PROVIDER_EDGE) {
-            ensureEdgeEngine()
-        } else {
+        // Libère le moteur cloud devenu inutile (connexion, cache disque) et crée
+        // seulement celui qui sert désormais — l'instance native, elle, reste.
+        if (newProvider != SettingsManager.TTS_PROVIDER_EDGE) {
             edgeEngine?.release()
             edgeEngine = null
+        }
+        if (newProvider != SettingsManager.TTS_PROVIDER_GEMINI) {
+            geminiEngine?.release()
+            geminiEngine = null
+        }
+        when (newProvider) {
+            SettingsManager.TTS_PROVIDER_EDGE -> ensureEdgeEngine()
+            SettingsManager.TTS_PROVIDER_GEMINI -> ensureGeminiEngine()
         }
     }
 
@@ -93,8 +130,16 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
      */
     override fun speak(text: String) {
         val engine = activeEngine
-        if (engine is EdgeTtsEngine && !isNetworkAvailable()) {
+        if (engine.isOnline && !isNetworkAvailable()) {
             handleFallback("Pas de connexion réseau")
+            nativeEngine.speak(text)
+            return
+        }
+        // Gemini sans clé ne peut rien produire : bascule immédiate plutôt que
+        // d'attendre l'échec réseau, pour ne pas laisser l'app muette après
+        // sélection du provider mais avant saisie de la clé.
+        if (engine is GeminiTtsEngine && settings.geminiApiKey.isBlank()) {
+            handleFallback("Clé API Gemini non configurée")
             nativeEngine.speak(text)
             return
         }
@@ -112,28 +157,34 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
     override fun stop() {
         nativeEngine.stop()
         edgeEngine?.stop()
+        geminiEngine?.stop()
     }
 
-    override fun isSpeaking(): Boolean = nativeEngine.isSpeaking() || (edgeEngine?.isSpeaking() == true)
+    override fun isSpeaking(): Boolean = nativeEngine.isSpeaking() ||
+        (edgeEngine?.isSpeaking() == true) || (geminiEngine?.isSpeaking() == true)
 
     override fun setVolume(volume: Float) {
         nativeEngine.setVolume(volume)
         edgeEngine?.setVolume(volume)
+        geminiEngine?.setVolume(volume)
     }
 
     override fun setSpeed(speed: Float) {
         nativeEngine.setSpeed(speed)
         edgeEngine?.setSpeed(speed)
+        geminiEngine?.setSpeed(speed)
     }
 
-    /** Change de voix — voix système si natif, nom de voix Edge TTS sinon. */
+    /** Change de voix — voix système si natif, nom de voix Edge/Gemini sinon. */
     fun setVoice(voiceName: String) {
         nativeEngine.setVoice(voiceName)
         edgeEngine?.setVoice(voiceName)
+        geminiEngine?.setVoice(voiceName)
     }
 
     fun getAvailableVoices(): List<String> = when (provider) {
         SettingsManager.TTS_PROVIDER_EDGE -> SettingsManager.EDGE_TTS_VOICES
+        SettingsManager.TTS_PROVIDER_GEMINI -> SettingsManager.GEMINI_TTS_VOICES
         else -> nativeEngine.getAvailableVoices().map { it.name }
     }
 
@@ -150,5 +201,7 @@ class HassanTtsManager(private val context: Context) : TtsEngine {
         nativeEngine.release()
         edgeEngine?.release()
         edgeEngine = null
+        geminiEngine?.release()
+        geminiEngine = null
     }
 }
