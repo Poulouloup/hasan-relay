@@ -82,7 +82,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     BargeInListener.Event.DuckingCancelled -> Unit
                     BargeInListener.Event.BargeInConfirmed -> {
                         stop() // libère le micro barge-in avant que le STT n'ouvre le sien
-                        updateState { copy(ttsStatus = TtsStatus.IDLE) }
+                        // ttsPlayingMessageId remis à null comme dans stopTts() et
+                        // onAllSpeakingDone : couper la parole à Hasan arrêtait bien
+                        // la lecture, mais laissait le bouton de la bulle armé, si
+                        // bien que l'appui suivant relançait la lecture au lieu de
+                        // l'arrêter.
+                        updateState { copy(ttsStatus = TtsStatus.IDLE, ttsPlayingMessageId = null) }
                         startListening()
                     }
                 }
@@ -442,7 +447,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         if (ttsManager.isSpeaking()) {
             ttsManager.stop()
-            updateState { copy(ttsStatus = TtsStatus.IDLE) }
+            // ttsPlayingMessageId remis à null avec ttsStatus — sinon le bouton de
+            // la bulle reste armé alors que la lecture a été coupée par le micro.
+            updateState { copy(ttsStatus = TtsStatus.IDLE, ttsPlayingMessageId = null) }
             // Délai pour laisser le haut-parleur se taire avant d'ouvrir le micro
             viewModelScope.launch {
                 delay(600)
@@ -948,8 +955,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         uiUpdateJob = null
                         updateState { copy(thinkingMessage = null) }
                         val responseText = streamingBuffer.toString()
-                        // TTS déclenché sur le texte complet une fois le stream terminé
-                        if (settings.ttsEnabled && responseText.isNotBlank()) ttsManager.speak(responseText)
+                        // TTS déclenché sur le texte complet une fois le stream terminé.
+                        // ttsPlayingMessageId est renseigné ici comme le ferait
+                        // readAloud() : sans lui, la lecture automatique (TTS activé
+                        // dans les Réglages) laissait le bouton de la bulle dans
+                        // l'état "arrêté" alors que le message était bel et bien en
+                        // cours de lecture — seul un appui manuel armait cet état.
+                        if (settings.ttsEnabled && responseText.isNotBlank()) {
+                            updateState {
+                                copy(ttsPlayingMessageId = streamingMessageId.takeIf { it >= 0 })
+                            }
+                            ttsManager.speak(responseText)
+                        }
                         val durationMs = System.currentTimeMillis() - streamStartTime
                         LatencyLog.mark("DONE", turn, "total=${durationMs}ms len=${responseText.length}")
                         // Hermes peut catcher sa propre erreur d'appel LLM (ex: tool_calls
