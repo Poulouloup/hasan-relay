@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.rememberDrawerState
+import androidx.activity.OnBackPressedCallback
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +34,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import com.hasan.v1.db.HermesSession
+import com.hasan.v1.ui.BackHandledScreen
 import com.hasan.v1.ui.components.DrawerCallbacks
 import com.hasan.v1.ui.components.DrawerSessionItem
 import com.hasan.v1.ui.components.DrawerUiState
@@ -77,6 +79,16 @@ class MainActivity : AppCompatActivity() {
 
     /** Piloté depuis confirmQuit() — affiche HasanConfirmOverlay par-dessus tout l'écran. */
     private var showQuitConfirm by mutableStateOf(false)
+
+    /**
+     * Ferme le drawer s'il est ouvert, et dit s'il l'était — publié par le
+     * Composable racine, qui seul possède le [DrawerState]. Nécessaire au
+     * retour arrière : le drawer est la première couche à refermer, mais
+     * l'Activity n'a aucun autre moyen de connaître son état (à la
+     * différence de [requestOpenDrawer], qui ne fait que le piloter dans
+     * l'autre sens). Null tant que le Composable n'est pas passé.
+     */
+    private var closeDrawerIfOpen: (() -> Boolean)? = null
 
     /**
      * Vrai quand le mode mains libres occupe le conteneur de fragments. Doublonne
@@ -139,6 +151,7 @@ class MainActivity : AppCompatActivity() {
 
         setupFragments(savedInstanceState)
         setupDrawerRoot()
+        setupBackNavigation()
 
         // Démarre le service wake word si activé dans les préférences ET si RECORD_AUDIO
         // est réellement accordée — les deux sont découplés (préférence utilisateur vs état
@@ -254,6 +267,19 @@ class MainActivity : AppCompatActivity() {
                 if (requestOpenDrawer) {
                     requestOpenDrawer = false
                     scope.launch { drawerState.open() }
+                }
+
+                // Publie de quoi refermer le drawer vers l'Activity (retour
+                // arrière) — le DrawerState n'existe qu'ici. DisposableEffect
+                // pour ne pas laisser une lambda capturant un état mort
+                // derrière soi si le Composable quitte la composition.
+                androidx.compose.runtime.DisposableEffect(drawerState) {
+                    closeDrawerIfOpen = {
+                        val wasOpen = drawerState.isOpen
+                        if (wasOpen) scope.launch { drawerState.close() }
+                        wasOpen
+                    }
+                    onDispose { closeDrawerIfOpen = null }
                 }
 
                 androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
@@ -427,6 +453,68 @@ class MainActivity : AppCompatActivity() {
         val transaction = supportFragmentManager.beginTransaction()
         listOf(chatFragment, tasksFragment, kanbanFragment, memoryFragment, toolsPermissionsFragment, settingsFragment).forEach { transaction.hide(it) }
         transaction.show(fragment).commit()
+    }
+
+    // ─────────────────────────── Retour arrière ───────────────────────────────
+
+    /**
+     * Retour arrière (geste de swipe ou bouton système) — enregistré une
+     * fois dans onCreate.
+     *
+     * Sans ce callback, le comportement par défaut d'Android était de
+     * terminer l'Activity : depuis n'importe quel onglet ou overlay, un
+     * swipe back renvoyait directement au launcher, sans confirmation et
+     * sans jamais "remonter" d'un cran (issue #3).
+     *
+     * L'app n'a pas de back stack fragment à dépiler : les six onglets sont
+     * ajoutés une fois pour toutes puis show/hide (voir [showFragment]), et
+     * les overlays (mains libres, Logs, Fichiers) sont add/remove manuels.
+     * La hiérarchie de retour est donc reconstruite explicitement ici, de
+     * la couche la plus superficielle à la plus profonde :
+     *
+     * 1. overlay de confirmation "Quitter" ouvert → le refermer ;
+     * 2. drawer ouvert → le refermer ;
+     * 3. overlay plein écran (mains libres / Logs / Fichiers) → revenir à
+     *    l'écran qui l'a ouvert, via son propre `close*()` (chacun sait où
+     *    retourner : Logs → Réglages, Fichiers/mains libres → Chat). Fichiers
+     *    remonte d'abord son arborescence ([BackHandledScreen]) avant de se
+     *    fermer ;
+     * 4. profondeur interne à l'onglet courant ([BackHandledScreen] : éditeur
+     *    de tâche, détail Kanban/Mémoire, overlay certificats…) → refermer
+     *    cette couche, l'onglet reste affiché ;
+     * 5. onglet secondaire déjà à sa racine → revenir au Chat, l'onglet
+     *    d'accueil ;
+     * 6. page principale (Chat) → demander confirmation avant de quitter.
+     *
+     * Seul le cas 6 quitte réellement l'app, et jamais sans passer par
+     * [confirmQuit].
+     */
+    /** Le Fragment de l'onglet actuellement affiché — support de [BackHandledScreen]. */
+    private fun currentTabFragment(): Fragment = when (selectedNavTab) {
+        HasanNavTab.CHAT -> chatFragment
+        HasanNavTab.TASKS -> tasksFragment
+        HasanNavTab.KANBAN -> kanbanFragment
+        HasanNavTab.MEMORY -> memoryFragment
+        HasanNavTab.TOOLS -> toolsPermissionsFragment
+        HasanNavTab.SETTINGS -> settingsFragment
+    }
+
+    private fun setupBackNavigation() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    showQuitConfirm -> showQuitConfirm = false
+                    closeDrawerIfOpen?.invoke() == true -> Unit
+                    isLightModeActive -> exitLightMode()
+                    logsFragment != null -> closeLogs()
+                    filesFragment?.onBackPressed() == true -> Unit
+                    filesFragment != null -> closeFiles()
+                    (currentTabFragment() as? BackHandledScreen)?.onBackPressed() == true -> Unit
+                    selectedNavTab != HasanNavTab.CHAT -> onNavTabSelected(HasanNavTab.CHAT)
+                    else -> confirmQuit()
+                }
+            }
+        })
     }
 
     // ─────────────────────────── Quitter l'app ────────────────────────────────

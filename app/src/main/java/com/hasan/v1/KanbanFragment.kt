@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import com.hasan.v1.databinding.FragmentKanbanBinding
+import com.hasan.v1.ui.BackHandledScreen
 import com.hasan.v1.ui.screens.KanbanCallbacks
 import com.hasan.v1.ui.screens.KanbanDetailCallbacks
 import com.hasan.v1.ui.screens.KanbanScreen
@@ -23,9 +24,16 @@ import com.hasan.v1.ui.theme.HasanTheme
  * frontend web statique de hermes-webui. Navigation interne board/détail
  * gérée par l'état du ViewModel (selectedTaskId), même principe que Skills.
  */
-class KanbanFragment : Fragment() {
+class KanbanFragment : Fragment(), BackHandledScreen {
 
     private val viewModel: KanbanViewModel by activityViewModels()
+
+    /** Retour arrière : referme le détail d'une carte et revient au board. */
+    override fun onBackPressed(): Boolean {
+        if (viewModel.uiState.value.selectedTaskId == null) return false
+        viewModel.closeTaskDetail()
+        return true
+    }
 
     private var _binding: FragmentKanbanBinding? = null
     private val binding get() = _binding!!
