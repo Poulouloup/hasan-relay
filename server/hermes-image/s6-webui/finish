@@ -1,0 +1,15 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Calqué sur le finish du dashboard : décide si s6 doit redémarrer le service.
+# Service activé → exit 0, s6 relance en cas de crash. Service désactivé
+# (HASAN_WEBUI=false) → exit 125, marqueur "échec permanent" : s6 laisse le
+# slot "down" sans boucler dessus.
+
+case "${HASAN_WEBUI:-1}" in
+    0|false|FALSE|False|no|NO|No)
+        exit 125
+        ;;
+    *)
+        exit 0
+        ;;
+esac
