@@ -43,16 +43,31 @@ EOF
 
 # ─────────────────────── Hermes : natif ou conteneurisé ? ───────────────────
 
-# Nom d'image officielle publiée par Nous Research (Docker Hub + GHCR).
-HERMES_IMAGE_MATCH="nousresearch/hermes-agent"
+# Motifs d'image reconnus comme "un Hermès" :
+#   - nousresearch/hermes-agent : l'image officielle (Docker Hub + GHCR) ;
+#   - hasan-hermes : notre image dérivée (server/hermes-image/), qui embarque
+#     hermes-webui. Sans ce second motif, un déploiement homelab utilisant
+#     l'image dérivée serait vu comme "pas de Hermès" (bug rencontré au test).
+HERMES_IMAGE_PATTERNS=("nousresearch/hermes-agent" "hasan-hermes")
 
 # Renvoie le nom du conteneur Hermes en cours d'exécution, ou une chaîne vide.
 # Cherche par image plutôt que par nom de conteneur : le nom est libre
 # (chacun nomme son service comme il veut dans son compose), l'image ne l'est
-# pas.
+# pas. --filter ancestor exige le nom exact du tag, donc on liste les
+# conteneurs et on filtre l'image nous-mêmes pour matcher un préfixe
+# (l'utilisateur peut tagger hasan-hermes:latest, :local, :v2…).
 detect_hermes_container() {
     command -v docker >/dev/null 2>&1 || return 0
-    docker ps --filter "ancestor=${HERMES_IMAGE_MATCH}" --format '{{.Names}}' 2>/dev/null | head -n1
+    local line name image
+    while IFS='|' read -r name image; do
+        [[ -z "${name}" ]] && continue
+        for pat in "${HERMES_IMAGE_PATTERNS[@]}"; do
+            if [[ "${image}" == "${pat}"* || "${image}" == *"/${pat}"* ]]; then
+                echo "${name}"
+                return 0
+            fi
+        done
+    done < <(docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null)
 }
 
 # Mode d'installation de Hermes : "container", "native" ou "none".
