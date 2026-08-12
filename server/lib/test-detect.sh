@@ -114,20 +114,16 @@ else
 fi
 echo
 
-# ── 5. Caddy ────────────────────────────────────────────────────────────────
+# ── 5. Caddy / port 443 ─────────────────────────────────────────────────────
 echo "5. Caddy (TLS, point d'entrée unique)"
-if caddy_container_running; then
-    ok "un conteneur Caddy tourne déjà"
-    info "L'installateur le réutilisera plutôt que d'en lancer un second."
+CADDY_HOLDER="$(port_443_foreign_holder)"
+if [[ -n "${CADDY_HOLDER}" ]]; then
+    no "le port 443 est déjà tenu par un tiers : ${CADDY_HOLDER}"
+    info "L'installateur réutilisera cet existant plutôt que d'en lancer un"
+    info "second (qui crash-looperait — piège du 2026-07-28)."
     info "→ il affichera les lignes de routage à ajouter à votre Caddyfile."
-elif caddy_native_running; then
-    no "un Caddy NATIF (systemd) tourne déjà"
-    info "C'est le piège du 2026-07-28 : deux Caddy sur le même port, deux"
-    info "Caddyfiles divergents, 401 trompeurs et ban fail2ban."
-    info "→ l'installateur réutilisera ce Caddy et affichera les lignes de"
-    info "  routage à ajouter, plutôt que d'en lancer un second."
 else
-    info "aucun Caddy détecté (ni conteneur, ni systemd) — l'installateur en lancera un"
+    info "port 443 libre — l'installateur lancera son propre Caddy"
 fi
 if caddyfile_is_ours "${SCRIPT_DIR}/../Caddyfile" "${CADDY_MARKER}"; then
     ok "server/Caddyfile porte notre marqueur — déploiement existant"

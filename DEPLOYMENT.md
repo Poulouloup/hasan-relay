@@ -33,10 +33,31 @@ provided).
 ```bash
 git clone https://github.com/Poulouloup/hasan-mobile-relay.git
 cd hasan-mobile-relay
-sudo ./server/install-bridge.sh
+
+# Optional but recommended: dry-run detection first — reports what the
+# installer WILL do, without touching anything.
+bash server/lib/test-detect.sh
+
+sudo ./server/install.sh
 ```
 
-One command, run once. It:
+`server/install.sh` is **adaptive**: it detects whether your Hermes runs
+natively or in a container and provisions accordingly (see
+[Hermes native vs containerised](#hermes-native-vs-containerised) below). It
+also:
+
+- **Refuses to run from inside a container** — it installs Docker and launches
+  containers, which only makes sense on the host. Running it inside Hermes
+  would attempt Docker-in-Docker and write only to ephemeral layers.
+- **Reuses an existing Caddy** (container or systemd) instead of launching a
+  second one on port 443 — avoids the diverging-Caddyfile pitfall below.
+- **Can run without root** if you're in the `docker` group and Docker is
+  already installed; root is only needed to install Docker itself.
+
+> The older `server/install-bridge.sh` still exists for the native-only path
+> but is superseded by `install.sh`, which covers both modes.
+
+It:
 - Installs Docker if not already present (official `get.docker.com` script).
 - Asks a few questions (your server's public IP/hostname, whether
   hermes-webui is already running here and its password if so, whether to
@@ -82,11 +103,55 @@ processes (one containerized, one native) both trying to claim the same
 public port, with diverging configs — this happened once during this
 project's own development and cost hours of confusing debugging (401s
 that looked like a credentials problem but were actually requests hitting
-the wrong backend). `install-bridge.sh` checks for a port conflict before
-starting containers. See
+the wrong backend). `install.sh` detects any foreign holder of port 443
+(container or native process) and reuses it instead of starting a second
+Caddy. See
 `plugin/hasan_delivery/skills/hasan-bridge-diagnosis/SKILL.md` for the
 full diagnostic writeup, including which Caddy config is canonical for
 which purpose.
+
+## Hermes native vs containerised
+
+`install.sh` handles both, and the plugin lands in the same place either way
+(the directory Hermes scans at startup) — only *how* it gets there differs.
+
+### Native Hermes
+
+The common VPS case. The installer:
+- installs hermes-webui alongside Hermes if absent (clones
+  `nesquena/hermes-webui` at `master`, installs its deps into Hermes's venv,
+  starts it via its own `ctl.sh`);
+- copies the plugin into `~/.hermes/plugins/` and installs `httpx` into the
+  Hermes venv;
+- restarts Hermes via `systemctl --user restart hermes-gateway.service`.
+
+### Containerised Hermes (homelab)
+
+Here the plugin's dependency (`httpx`) is already in the official image, and
+webui **must live inside the Hermes container** — it imports Hermes's own code
+(`agent.*`, `hermes_cli.*`) and can't run standalone. So webui is not
+installed separately: it's baked into a **derived image**.
+
+1. Build the derived image (Hermes + webui, s6-supervised) — see
+   [`server/hermes-image/README.md`](server/hermes-image/README.md):
+   ```bash
+   docker build -t hasan-hermes server/hermes-image
+   ```
+2. Point your Hermes `docker-compose.yml` at `hasan-hermes` instead of
+   `nousresearch/hermes-agent`, with `command: gateway run` and a
+   `~/.hermes:/opt/data` volume. Bring it up.
+3. Run `sudo ./server/install.sh`. It detects the container (by image), drops
+   the plugin into the mounted volume via `docker cp` (the volume is owned by
+   the container's uid 10000, so a plain host copy can't write there), fixes
+   ownership so Hermes can read it, then restarts the container.
+
+If Hermes runs the **bare official image** (no webui), the installer **refuses
+and tells you to rebuild** with the derived image — webui can't be bolted on
+afterward, and without it the app's Chat screen wouldn't work.
+
+> **Cleanup note**: files Hermes writes to `~/.hermes` are owned by the
+> container's uid 10000, so `rm -rf ~/.hermes` from the host needs sudo, or:
+> `docker run --rm -v ~/.hermes:/d alpine rm -rf /d/*`.
 
 ## Manual / non-Docker path (advanced, or what the script does under the hood)
 

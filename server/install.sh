@@ -151,20 +151,19 @@ fi
 
 echo "==> hermes-webui (écran Chat de l'app)"
 WEBUI_URL=""
-if webui_is_running; then
+if [[ "${HERMES_MODE}" == "container" ]]; then
+    # En conteneurisé, la question n'est pas "webui répond-il ?" (il peut être
+    # lent à démarrer) mais "est-il dans l'image ?". S'il n'y est pas, l'image
+    # nue a été utilisée et webui ne peut pas être ajouté après coup.
+    if webui_embedded_in_container "${HERMES_CONTAINER}"; then
+        echo "  hermes-webui embarqué dans l'image — rien à installer."
+        WEBUI_URL="https://${PUBLIC_HOST}"
+    else
+        webui_container_missing_abort
+    fi
+elif webui_is_running; then
     echo "  hermes-webui répond déjà sur :8787 — rien à installer."
     WEBUI_URL="https://${PUBLIC_HOST}"
-elif [[ "${HERMES_MODE}" == "container" ]]; then
-    # En conteneurisé, webui vit DANS l'image Hermès (server/hermes-image/).
-    # S'il ne répond pas alors que Hermès est conteneurisé, c'est que l'image
-    # de base a été utilisée au lieu de l'image dérivée.
-    echo "  hermes-webui ne répond pas alors que Hermès est conteneurisé." >&2
-    echo "  hermes-webui doit tourner DANS le conteneur Hermès : reconstruisez" >&2
-    echo "  l'image dérivée qui l'embarque et relancez le conteneur :" >&2
-    echo "    docker build -t hasan-hermes ${REPO_ROOT}/server/hermes-image" >&2
-    echo "  puis pointez votre compose sur 'hasan-hermes' au lieu de" >&2
-    echo "  'nousresearch/hermes-agent'. Voir server/hermes-image/README.md." >&2
-    echo "  (Installation poursuivie ; le Chat ne marchera qu'une fois webui up.)"
 else
     # Hermès natif : webui tourne à côté, dans le même venv. On l'installe
     # s'il est absent (clone amont master, deps dans le venv Hermès).
@@ -178,14 +177,12 @@ fi
 echo "==> Caddy"
 CADDYFILE="${SCRIPT_DIR}/Caddyfile"
 REUSE_EXISTING_CADDY=0
-if caddy_native_running; then
-    echo "  Un Caddy NATIF (systemd) tourne déjà — il sera réutilisé." >&2
-    echo "  Deux Caddy sur le même port = le piège du 2026-07-28 (401" >&2
-    echo "  trompeurs, ban fail2ban). Les lignes de routage à ajouter à" >&2
-    echo "  votre Caddyfile seront affichées à la fin." >&2
-    REUSE_EXISTING_CADDY=1
-elif caddy_container_running && ! caddyfile_is_ours "${CADDYFILE}" "${CADDY_MARKER}"; then
-    echo "  Un conteneur Caddy tiers tourne déjà — il sera réutilisé."
+CADDY_443_HOLDER="$(port_443_foreign_holder)"
+if [[ -n "${CADDY_443_HOLDER}" ]]; then
+    echo "  Le port 443 est déjà tenu par un tiers : ${CADDY_443_HOLDER}."
+    echo "  On ne lance PAS un second Caddy (il crash-looperait sur le port"
+    echo "  occupé — piège du 2026-07-28). L'existant sera réutilisé ; les"
+    echo "  lignes de routage à ajouter seront affichées à la fin."
     REUSE_EXISTING_CADDY=1
 fi
 

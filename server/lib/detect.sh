@@ -118,31 +118,58 @@ webui_is_running() {
     curl -sf -o /dev/null --max-time 3 http://127.0.0.1:8787/health 2>/dev/null
 }
 
+# webui est-il EMBARQUÉ dans l'image du conteneur Hermes ?
+#
+# Distinct de "répond-il ?" : au démarrage, webui met ~15-20 s à répondre
+# (s6 le lance après main-hermes). Sans cette distinction, un webui simplement
+# lent serait pris pour une image nue et l'installation refusée à tort. On
+# regarde donc si le CODE est présent (/opt/hermes/hermes-webui), ce qui
+# tranche entre l'image dérivée (présent) et l'image officielle nue (absent),
+# indépendamment de l'état de démarrage.
+webui_embedded_in_container() {
+    local container="$1"
+    docker exec "${container}" sh -c 'test -d /opt/hermes/hermes-webui' >/dev/null 2>&1
+}
+
 # Un dépôt hermes-webui est-il déjà cloné, même s'il ne tourne pas ?
 webui_is_installed() {
     local user_home="$1"
     [[ -d "${user_home}/hermes-webui/.git" ]]
 }
 
-# Un Caddy tourne-t-il déjà, et est-ce le nôtre ?
+# Le port 443 est-il tenu par quelque chose QUI N'EST PAS À NOUS ?
 #
-# Distinguer les deux est essentiel : écraser le Caddyfile d'un tiers casse
-# son service, et faire tourner deux Caddy sur le même port produit
-# exactement le piège du 2026-07-28 (deux Caddyfiles divergents, 401
-# trompeurs, ban fail2ban accidentel).
-caddy_container_running() {
-    command -v docker >/dev/null 2>&1 || return 1
-    [[ -n "$(docker ps --filter "ancestor=caddy" --format '{{.Names}}' 2>/dev/null | head -n1)" ]]
+# C'est la vraie question, plus large que "un Caddy tourne-t-il ?" : n'importe
+# quel service tiers (un autre reverse-proxy, un conteneur du homelab) peut
+# déjà occuper 443. S'il est occupé par un tiers, on ne doit PAS lancer notre
+# Caddy — il entrerait en conflit et crash-looperait (bug rencontré au test :
+# hasan-bridge-caddy en Restarting derrière un caddy-perso). On réutilise
+# l'existant à la place.
+#
+# "À nous" = un conteneur du projet compose hasan-bridge. Tout le reste est
+# tiers. On renvoie le nom du détenteur tiers, ou vide si 443 est libre ou
+# tenu par nous.
+port_443_foreign_holder() {
+    command -v docker >/dev/null 2>&1 || { _port_holder_native 443; return; }
+    # Conteneurs publiant 443, hors projet hasan-bridge.
+    local holder
+    holder="$(docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null \
+        | awk -F'\t' '$2 ~ /:443->/ {print $1}' \
+        | grep -v '^hasan-bridge-' | head -n1)"
+    if [[ -n "${holder}" ]]; then
+        echo "conteneur ${holder}"
+        return
+    fi
+    # Sinon, un process natif (Caddy systemd, autre).
+    _port_holder_native 443
 }
 
-# Un Caddy NATIF (systemd) tourne-t-il ?
-#
-# Ne pas chercher que le conteneur : sur le VPS de dev, c'est un Caddy natif
-# qui tient le port 443 (vérifié — `caddy` en systemd, pas docker-proxy).
-# Ne détecter que la variante conteneur laisserait croire le port libre pour
-# nous, et reproduirait le piège du 2026-07-28.
-caddy_native_running() {
-    systemctl is-active --quiet caddy 2>/dev/null
+# Détenteur natif d'un port (hors Docker), ou vide.
+_port_holder_native() {
+    local port="$1" h
+    command -v ss >/dev/null 2>&1 || return 0
+    h="$(ss -ltnp "sport = :${port}" 2>/dev/null | awk 'NR==2 {print $NF}')"
+    [[ -n "${h}" ]] && echo "process ${h}"
 }
 
 # Description de ce qui occupe un port, ou chaîne vide s'il est libre.

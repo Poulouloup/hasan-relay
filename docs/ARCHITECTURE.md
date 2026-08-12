@@ -62,19 +62,47 @@ même VPS :
 
 | Port | Service | Déploiement |
 |---|---|---|
-| 8767 | relay server (`server/relay/`) | Docker (`network_mode: host`) via `server/install-bridge.sh`, ou systemd via `server/relay/install-relay.sh` (voir DEPLOYMENT.md) |
-| 8787 | hermes-webui (chat) | projet externe, natif (venv + systemd), détecté et branché par `install-bridge.sh` |
-| 9119 | dashboard interne Hermes | natif (venv + systemd), fait partie de l'installation Hermes elle-même |
+| 8767 | relay server (`server/relay/`) | Docker (`network_mode: host`) via `server/install.sh` |
+| 8787 | hermes-webui (chat) | **selon le mode Hermès** (voir ci-dessous) |
+| 9119 | dashboard interne Hermes | fait partie de l'installation Hermès elle-même |
 | 443 / 8443 | Caddy (TLS) | Docker, route `:443`→8787 et `:8443` (opt-in)→9119 |
 
 Le relay et Caddy sont les deux seuls composants que ce repo installe et
-possède entièrement ; hermes-webui et le dashboard restent la
-responsabilité de l'installation Hermes de l'utilisateur, seulement
-détectés/branchés. `server/install-bridge.sh` et
-`server/Caddyfile.template` sont la source de vérité pour cette
-topologie — voir aussi
+possède entièrement. `server/install.sh` et `server/Caddyfile.template` sont
+la source de vérité — voir aussi
 `plugin/hasan_delivery/skills/hasan-bridge-diagnosis/SKILL.md` (skill
-Hermes de diagnostic, décrit la même topologie côté agent).
+Hermès de diagnostic, décrit la même topologie côté agent).
+
+### Installateur adaptatif — Hermès natif ou conteneurisé
+
+`server/install.sh` détecte comment Hermès tourne et s'adapte. Le plugin
+atterrit dans le dossier que Hermès scanne (`plugins/`) dans les deux cas —
+seule la manière d'y arriver change. Structuré en deux bibliothèques
+sourcées : `lib/detect.sh` (lecture seule, sans effet de bord) et
+`lib/actions.sh` (écritures), plus `lib/test-detect.sh` qui affiche le
+diagnostic sans rien modifier.
+
+**Garde-fous** : refuse de s'exécuter dans un conteneur (`/.dockerenv` —
+sinon Docker-dans-Docker) ; réutilise tout Caddy tiers déjà sur `:443` au
+lieu d'en lancer un second qui crash-looperait ; ne remplace jamais
+l'installation de Hermès.
+
+- **Hermès natif** — hermes-webui tourne à côté dans le venv de Hermès
+  (installé si absent : clone `nesquena/hermes-webui@master`). Le plugin est
+  copié dans `~/.hermes/plugins/`, `httpx` installé dans le venv, Hermès
+  redémarré via `systemctl --user`.
+
+- **Hermès conteneurisé** — hermes-webui **ne peut pas** vivre à part : il
+  importe le code interne de Hermès (`agent.*`, `hermes_cli.*`, >100 imports).
+  Il est donc **embarqué dans une image dérivée** (`server/hermes-image/`,
+  `FROM nousresearch/hermes-agent` + clone webui), supervisé comme service s6
+  aux côtés de `main-hermes` et `dashboard`. Ce n'est pas un fork : webui est
+  cloné depuis l'amont, jamais modifié. Le plugin est déposé dans le volume
+  `/opt/data/plugins/` via `docker cp` (le volume appartient à l'uid 10000 du
+  conteneur, une copie hôte directe n'y a pas accès), puis `httpx` est déjà
+  présent dans l'image — rien à installer. Si l'image officielle **nue** est
+  utilisée (sans webui), l'installateur **refuse** et demande de reconstruire
+  avec l'image dérivée : webui ne peut pas être ajouté après coup.
 
 ## Pairing
 

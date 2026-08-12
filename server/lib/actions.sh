@@ -5,6 +5,33 @@
 # Chaque fonction est volontairement étroite pour rester lisible et testable.
 # Elles supposent detect.sh déjà sourcé (elles s'appuient sur ses fonctions).
 
+# ─────────────────────── webui absent en conteneur → abandon ───────────────
+
+# Appelé quand Hermès est conteneurisé mais que webui n'est PAS dans l'image.
+# webui ne peut pas être ajouté après coup (il importe le code de Hermès) :
+# on refuse et on guide vers le rebuild, plutôt que de livrer un déploiement
+# sans écran Chat.
+webui_container_missing_abort() {
+    cat >&2 <<EOF
+Hermès est conteneurisé mais hermes-webui n'est pas dans l'image.
+
+hermes-webui doit tourner DANS le conteneur Hermès — il importe le code de
+Hermès et ne peut pas être ajouté à part. L'image utilisée est probablement
+l'image officielle nue, sans webui.
+
+À faire : reconstruire l'image dérivée qui embarque webui, puis pointer
+votre compose Hermès dessus :
+
+  docker build -t hasan-hermes ${REPO_ROOT}/server/hermes-image
+  # dans votre docker-compose.yml Hermès :
+  #   image: hasan-hermes    (au lieu de nousresearch/hermes-agent)
+  docker compose up -d
+
+Puis relancer ce script. Voir server/hermes-image/README.md.
+EOF
+    exit 1
+}
+
 # ─────────────────────── hermes-webui (mode natif) ─────────────────────────
 
 # Clone hermes-webui depuis l'amont et installe ses deux dépendances dures
