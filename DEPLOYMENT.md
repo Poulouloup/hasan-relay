@@ -54,8 +54,8 @@ also:
 - **Can run without root** if you're in the `docker` group and Docker is
   already installed; root is only needed to install Docker itself.
 
-> The older `server/install-bridge.sh` still exists for the native-only path
-> but is superseded by `install.sh`, which covers both modes.
+> `install.sh` replaces the earlier native-only `install-bridge.sh` — it
+> covers both native and containerised Hermes in one script.
 
 It:
 - Installs Docker if not already present (official `get.docker.com` script).

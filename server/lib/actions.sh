@@ -32,6 +32,38 @@ EOF
     exit 1
 }
 
+# ─────────────────────── Mot de passe hermes-webui ─────────────────────────
+
+# Résout le mot de passe webui pour le QR de pairing, sans prompt si possible.
+# Ordre : env HERMES_WEBUI_PASSWORD déjà exportée > source selon le mode
+# (fichier .env en natif, env du conteneur en conteneurisé) > prompt manuel.
+# Écrit le résultat sur stdout (chaîne vide si rien) — la fonction ne parle
+# qu'à stderr pour ne pas polluer sa valeur de retour.
+resolve_webui_password() {
+    local user_home="$1" mode="$2" container="$3" pw=""
+
+    if [[ -n "${HERMES_WEBUI_PASSWORD:-}" ]]; then
+        echo "${HERMES_WEBUI_PASSWORD}"
+        return
+    fi
+
+    if [[ "${mode}" == "container" ]]; then
+        # En conteneurisé, le mot de passe vit dans l'environnement du
+        # conteneur Hermès (posé via le compose ou le .env de /opt/data).
+        pw="$(docker exec "${container}" sh -c 'printf %s "${HERMES_WEBUI_PASSWORD:-}"' 2>/dev/null)"
+    elif [[ -f "${user_home}/hermes-webui/.env" ]]; then
+        pw="$(grep '^HERMES_WEBUI_PASSWORD=' "${user_home}/hermes-webui/.env" 2>/dev/null | head -n1 | cut -d= -f2-)"
+    fi
+
+    if [[ -z "${pw}" ]]; then
+        # Dernier recours : demander. Prompt et lecture sur le terminal (stderr
+        # pour le prompt, la saisie ne transite pas par stdout).
+        read -rsp "Mot de passe hermes-webui (vide = login manuel dans l'app) : " pw </dev/tty >&2
+        echo >&2
+    fi
+    echo "${pw}"
+}
+
 # ─────────────────────── hermes-webui (mode natif) ─────────────────────────
 
 # Clone hermes-webui depuis l'amont et installe ses deux dépendances dures
@@ -73,6 +105,7 @@ install_webui_native() {
 
 write_env_file() {
     local env_file="$1" admin_token="$2" public_host="$3"
+    local webui_url="${4:-}" webui_password="${5:-}"
     cat > "${env_file}" <<EOF
 # Généré par server/install.sh — ne pas éditer à la main.
 RELAY_ADMIN_TOKEN=${admin_token}
@@ -81,6 +114,16 @@ HERMES_API_BASE_URL=http://127.0.0.1:8443
 # Sessions de pairing persistées dans le volume du conteneur relay.
 RELAY_SESSIONS_PATH=/data/sessions.json
 EOF
+    # WEBUI_URL/WEBUI_PASSWORD : le relay les embarque dans le QR de pairing
+    # pour que l'app se connecte au Chat automatiquement. Les deux ou aucun
+    # (le relay valide cette règle). Sans mot de passe, on n'écrit ni l'un ni
+    # l'autre — l'utilisateur saisira le login dans l'app.
+    if [[ -n "${webui_url}" ]] && [[ -n "${webui_password}" ]]; then
+        cat >> "${env_file}" <<EOF
+WEBUI_URL=${webui_url}
+WEBUI_PASSWORD=${webui_password}
+EOF
+    fi
     chmod 600 "${env_file}"
     echo "  ${env_file} écrit (permissions 600)."
 }
@@ -89,6 +132,7 @@ EOF
 
 render_caddyfile() {
     local template="$1" caddyfile="$2" public_host="$3" force="$4" marker="$5"
+    local expose_dashboard="${6:-0}" dashboard_template="${7:-}"
 
     if [[ -f "${caddyfile}" ]] && ! head -n1 "${caddyfile}" | grep -qF "${marker}"; then
         if [[ "${force}" -ne 1 ]]; then
@@ -101,6 +145,13 @@ render_caddyfile() {
 
     sed "s/{{PUBLIC_HOST}}/${public_host}/g" "${template}" > "${caddyfile}"
     echo "  ${caddyfile} rendu pour ${public_host}."
+
+    # Bloc dashboard optionnel (:8443 → :9119), ajouté seulement si demandé.
+    if [[ "${expose_dashboard}" -eq 1 ]] && [[ -f "${dashboard_template}" ]]; then
+        echo >> "${caddyfile}"
+        sed "s/{{PUBLIC_HOST}}/${public_host}/g" "${dashboard_template}" >> "${caddyfile}"
+        echo "  Bloc dashboard (:8443 → :9119) ajouté."
+    fi
 }
 
 # ─────────────────────── Dépôt du plugin ───────────────────────────────────
@@ -219,7 +270,8 @@ print_summary() {
 Déploiement terminé — mode Hermès : ${HERMES_MODE}
 
   Relay (Android)     : https://${PUBLIC_HOST}:8767
-$( [[ -n "${WEBUI_URL}" ]] && echo "  Chat (hermes-webui) : ${WEBUI_URL}" )
+$( [[ -n "${WEBUI_URL}" ]] && echo "  Chat (hermes-webui) : ${WEBUI_URL}$( [[ -z "${WEBUI_PASSWORD}" ]] && echo "  (login à saisir dans l'app)" )" )
+$( [[ "${EXPOSE_DASHBOARD}" -eq 1 ]] && echo "  Dashboard Hermès    : https://${PUBLIC_HOST}:8443" )
 
   RELAY_ADMIN_TOKEN (à conserver, affiché une seule fois) :
     ${RELAY_ADMIN_TOKEN}
@@ -245,7 +297,7 @@ EOF
   Code de pairing (à scanner en QR depuis l'app) :
     ${PAIRING_JSON:-échec de génération — relancer POST /pairing/create}
 
-  Rappel firewall : n'ouvrir que 443 au public, jamais 8767/8787/9119.
+  Rappel firewall : n'ouvrir que 443$( [[ "${EXPOSE_DASHBOARD}" -eq 1 ]] && echo " et 8443" ) au public, jamais 8767/8787/9119.
 
   Diagnostic :
     docker compose -p ${COMPOSE_PROJECT} ps

@@ -109,7 +109,7 @@ l'installation de Hermès.
 Le pairing est une opération ponctuelle : un code (ou son équivalent QR)
 généré côté serveur (`POST /pairing/create`, protégé par
 `RELAY_ADMIN_TOKEN` — désormais généré automatiquement par
-`install-bridge.sh`, plus besoin d'édition manuelle du fichier de service)
+`install.sh`, plus besoin d'édition manuelle du fichier de service)
 échangé contre un `session_token`/`refresh_token` de longue durée.
 
 Format du QR — JSON brut, `{"relay_url", "code", "webui_url"?,

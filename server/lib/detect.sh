@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Détection de l'infrastructure existante, sourcé par install-bridge.sh.
+# Détection de l'infrastructure existante, sourcé par install.sh.
 #
 # Isolé dans son propre fichier pour être testable seul (voir
 # server/lib/test-detect.sh) : ces fonctions n'écrivent rien, ne demandent
@@ -169,7 +169,13 @@ _port_holder_native() {
     local port="$1" h
     command -v ss >/dev/null 2>&1 || return 0
     h="$(ss -ltnp "sport = :${port}" 2>/dev/null | awk 'NR==2 {print $NF}')"
-    [[ -n "${h}" ]] && echo "process ${h}"
+    # `[[ -n ... ]] && echo` en fin de fonction renverrait le code du test (1
+    # si vide), fatal sous `set -e` chez l'appelant. On sépare pour toujours
+    # sortir 0.
+    if [[ -n "${h}" ]]; then
+        echo "process ${h}"
+    fi
+    return 0
 }
 
 # Description de ce qui occupe un port, ou chaîne vide s'il est libre.

@@ -147,6 +147,15 @@ if [[ -z "${PUBLIC_HOST}" ]]; then
     exit 1
 fi
 
+# Exposition optionnelle du dashboard interne de Hermès (:9119) sur :8443.
+# Off par défaut : le dashboard est de l'admin, jamais utilisé par l'app, et
+# l'exposer publiquement demande une auth (voir la garde du dashboard).
+EXPOSE_DASHBOARD=0
+read -rp "Exposer le dashboard Hermès interne (:9119) publiquement sur :8443 ? [y/N] : " dash_answer
+if [[ "${dash_answer}" =~ ^[Yy] ]]; then
+    EXPOSE_DASHBOARD=1
+fi
+
 # ─────────────────────────── 4. hermes-webui ───────────────────────────────
 
 echo "==> hermes-webui (écran Chat de l'app)"
@@ -170,6 +179,15 @@ else
     echo "  hermes-webui absent — installation à côté de Hermès natif."
     install_webui_native "${HERMES_HOME}"
     WEBUI_URL="https://${PUBLIC_HOST}"
+fi
+
+# Mot de passe hermes-webui — porté dans le QR de pairing pour que l'app se
+# connecte au Chat automatiquement. Résolu sans prompt quand c'est possible :
+# env déjà exportée > .env de webui > prompt en dernier recours. Vide = pas de
+# login auto (l'utilisateur le saisira dans l'app).
+WEBUI_PASSWORD=""
+if [[ -n "${WEBUI_URL}" ]]; then
+    WEBUI_PASSWORD="$(resolve_webui_password "${USER_HOME}" "${HERMES_MODE}" "${HERMES_CONTAINER:-}")"
 fi
 
 # ─────────────────────────── 5. Caddy existant ? ───────────────────────────
@@ -205,12 +223,12 @@ fi
 # n'écoute pas forcément sur 127.0.0.1 vu du relay ; mais le relay tourne en
 # network_mode: host, donc 127.0.0.1 pointe bien vers l'hôte, où le port de
 # Hermès est publié. On garde 127.0.0.1 — cohérent avec le déploiement natif.
-write_env_file "${ENV_FILE}" "${RELAY_ADMIN_TOKEN}" "${PUBLIC_HOST}"
+write_env_file "${ENV_FILE}" "${RELAY_ADMIN_TOKEN}" "${PUBLIC_HOST}" "${WEBUI_URL}" "${WEBUI_PASSWORD}"
 
 # ─────────────────────────── 7. Caddyfile ──────────────────────────────────
 
 if [[ "${REUSE_EXISTING_CADDY}" -eq 0 ]]; then
-    render_caddyfile "${SCRIPT_DIR}/Caddyfile.template" "${CADDYFILE}" "${PUBLIC_HOST}" "${FORCE}" "${CADDY_MARKER}"
+    render_caddyfile "${SCRIPT_DIR}/Caddyfile.template" "${CADDYFILE}" "${PUBLIC_HOST}" "${FORCE}" "${CADDY_MARKER}" "${EXPOSE_DASHBOARD}" "${SCRIPT_DIR}/Caddyfile.dashboard-block.template"
 fi
 
 # ─────────────────────────── 8. Conteneurs ─────────────────────────────────
