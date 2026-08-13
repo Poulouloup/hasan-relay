@@ -25,7 +25,7 @@ server-side deployment is wired together.
 | 443 / 8443 | Caddy (TLS termination) | Docker container (`network_mode: host`) | public |
 
 The relay and Caddy are the only two containerized pieces of this
-deployment, installed by `server/install-bridge.sh` (Docker Compose,
+deployment, installed by `server/install.sh` (Docker Compose,
 `network_mode: host` — no bridge network, no NAT, containers reach
 `127.0.0.1`-bound peers exactly like native processes). Hermes itself
 (gateway, webui, dashboard) stays native, unchanged by this deployment —
@@ -36,7 +36,7 @@ containerization candidate.
 
 Config file locations:
 - `server/.env` (secrets: `RELAY_ADMIN_TOKEN`, `WEBUI_URL`/`WEBUI_PASSWORD`) — never `cat` this directly, it holds a live secret.
-- `server/Caddyfile` (rendered from `server/Caddyfile.template` by `install-bridge.sh` — first line has a `# managed-by: hasan-bridge docker compose` marker; if that marker is missing, this file was NOT written by that script).
+- `server/Caddyfile` (rendered from `server/Caddyfile.template` by `install.sh` — first line has a `# managed-by: hasan-bridge docker compose` marker; if that marker is missing, this file was NOT written by that script).
 - `server/docker-compose.yml` — the compose manifest itself, versioned in git, safe to read.
 - `${HERMES_HOME}/plugins/hasan_delivery/` — plugin code, installed by `plugin/hasan_delivery/install-plugin.sh`.
 
@@ -63,7 +63,7 @@ because either is wrong.
 form: a containerized Caddy and a native Caddy (or any other native
 process) can both try to bind the same host port, since host networking
 means the container has zero isolation from the host's port namespace.
-`install-bridge.sh` checks this before starting containers (`ss -ltnp` on
+`install.sh` checks this before starting containers (`ss -ltnp` on
 its target ports) and refuses to proceed if occupied — but a process
 started *after* the containers are already running could still collide
 silently. If something looks wrong, always check for a second listener
@@ -179,5 +179,5 @@ This skill is diagnostic only. It never restarts or recreates containers
 (`docker compose down`/`restart`/`up --force-recreate`, `docker rm`),
 never edits `server/Caddyfile`/`server/.env` by hand, and never
 regenerates pairing or session tokens. For a fix, re-run
-`server/install-bridge.sh` (idempotent, safe to re-run) or hand off to a
+`server/install.sh` (idempotent, safe to re-run) or hand off to a
 human operator.

@@ -1,4 +1,4 @@
-# Déploiement Docker du bridge Hasan (relay + Caddy) — voir install-bridge.sh.
+# Déploiement Docker du bridge Hasan (relay + Caddy) — voir install.sh.
 # network_mode: host sur les deux services : pas de réseau bridge Docker, pas
 # de NAT, pas de règle firewall inter-conteneurs à gérer — le relay et Caddy
 # communiquent avec leurs pairs (hermes-webui, dashboard Hermes) sur
@@ -16,7 +16,7 @@ services:
       # pairing.py pointe vers ~/.hermes/... du process, qui est éphémère
       # dans le conteneur sans ce volume : sans lui, tout pairing existant
       # est perdu à chaque recréation du conteneur. RELAY_SESSIONS_PATH dans
-      # .env doit pointer vers /data/sessions.json (voir install-bridge.sh).
+      # .env doit pointer vers /data/sessions.json (voir install.sh).
       - relay_data:/data
     restart: unless-stopped
 

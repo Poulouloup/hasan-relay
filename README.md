@@ -79,7 +79,7 @@ Pairing with the relay is done once via QR code (`QrScannerActivity` → `Pairin
 - **Light Mode** — full-screen hands-free interface with large mic button, TTS mute, and wake word listening
 - **TOFU certificate verification** — Trust On First Use for the relay's self-signed HTTPS/WSS
 - **No external account** — no API key, no subscription required
-- **One-command server deployment** — `server/install-bridge.sh` provisions the relay and Caddy TLS termination (Docker Compose) plus the Hermes plugin in a single interactive run
+- **Adaptive one-command deployment** — `server/install.sh` detects your Hermes install (native **or** containerised) and provisions accordingly: the relay and Caddy as Docker containers, and the `hasan_delivery` plugin dropped into wherever Hermes reads it. Refuses to run from inside a container, reuses an existing Caddy instead of colliding on port 443, and never modifies your Hermes install
 
 ---
 
@@ -87,10 +87,18 @@ Pairing with the relay is done once via QR code (`QrScannerActivity` → `Pairin
 
 ```
 hasanv1/
-├── server/relay/                        # Python (aiohttp) relay server — WebSocket ↔ Hermes bridge
-│   ├── server.py                        # WS handling, auth, dispatch by channel
-│   ├── chat_stream.py                   # chat/send → Hermes /v1/responses SSE → chat/token|done|error
-│   └── bridge_commands.py               # bridge/command dispatch to the paired device
+├── server/
+│   ├── install.sh                       # adaptive installer (native or containerised Hermes)
+│   ├── lib/detect.sh                    # infra detection (no side effects) — sourced by install.sh
+│   ├── lib/actions.sh                   # install actions (writes) — sourced by install.sh
+│   ├── lib/test-detect.sh              # dry-run detection report — run first on any target
+│   ├── hermes-image/                    # derived Hermes image = official + hermes-webui (s6 service)
+│   │   ├── Dockerfile                   # FROM nousresearch/hermes-agent + clone webui (master)
+│   │   └── s6-webui/                    # s6 service files supervising webui in-container
+│   └── relay/                           # Python (aiohttp) relay server — WebSocket ↔ Hermes bridge
+│       ├── server.py                    # WS handling, auth, dispatch by channel
+│       ├── chat_stream.py               # chat/send → Hermes /v1/responses SSE → chat/token|done|error
+│       └── bridge_commands.py           # bridge/command dispatch to the paired device
 └── app/src/main/
     ├── assets/                          # ONNX models (wake word + infrastructure)
     │   ├── melspectrogram.onnx          # OpenWakeWord pipeline (download — see SETUP.md)
@@ -169,6 +177,8 @@ hasanv1/
 | Session files (browse + download workspace) | ✅ |
 | Light Mode (full-screen hands-free) | ✅ |
 | One-command bridge deployment (relay + Caddy + plugin, Docker Compose) | ✅ |
+| Adaptive installer — Hermes native *or* containerised, Caddy reuse, container guard | ✅ |
+| Derived Hermes image bundling hermes-webui (s6-supervised) | ✅ |
 | Offline local STT (Whisper ONNX) | 🔜 V2 |
 | High-quality TTS (Piper) | 🔜 V2 |
 

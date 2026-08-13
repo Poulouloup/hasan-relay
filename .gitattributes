@@ -1,0 +1,8 @@
+# Les scripts shell doivent garder des fins de ligne LF, même clonés sous
+# Windows : un `.sh` en CRLF échoue à l'exécution sur Linux avec une erreur
+# opaque ("bad interpreter: /usr/bin/env bash^M"). Le contenu commité est
+# déjà en LF, cette règle empêche core.autocrlf de le convertir au checkout.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

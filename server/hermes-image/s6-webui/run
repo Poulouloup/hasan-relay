@@ -1,0 +1,39 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Service hermes-webui, supervisé par s6 au même titre que main-hermes et
+# dashboard. Calqué sur le service `dashboard` de l'image de base.
+#
+# Activé par HASAN_WEBUI (défaut : activé). Mis à "false", le service sort
+# proprement et son finish renvoie 125 → s6 le laisse "down" sans le
+# redémarrer, exactement comme le dashboard désactivé.
+
+case "${HASAN_WEBUI:-1}" in
+    0|false|FALSE|False|no|NO|No)
+        exit 0
+        ;;
+esac
+
+# with-contenv remet HOME à /root ; on le réancre sur /opt/data pour que
+# l'état webui (cookies de session, etc.) atterrisse dans le volume.
+export HOME=/opt/data
+
+# webui importe agent.* et hermes_cli.* : il DOIT tourner dans le venv de
+# Hermès, où ces modules vivent. On l'active plutôt que d'appeler un python
+# isolé.
+# shellcheck disable=SC1091
+. /opt/hermes/.venv/bin/activate
+
+cd /opt/hermes/hermes-webui
+
+# server.py ne prend pas d'arguments : il lit HERMES_WEBUI_HOST/PORT dans
+# l'environnement (api/config.py). On fixe le host à 0.0.0.0 par défaut —
+# dans un conteneur, un bind sur 127.0.0.1 ne serait pas joignable depuis
+# l'extérieur (server.py l'avertit lui-même). Le port reste 8787, celui que
+# l'app et Caddy attendent.
+export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
+export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
+
+# Drop vers l'utilisateur hermes (uid 10000) comme les autres services, sauf
+# si déjà non-root.
+[ "$(id -u)" = 0 ] || exec python server.py
+exec s6-setuidgid hermes python server.py

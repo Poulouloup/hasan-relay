@@ -7,6 +7,29 @@ montre déjà le quoi).
 ## [Unreleased]
 
 ### Added
+- Installateur adaptatif `server/install.sh` qui déploie le bridge selon le
+  mode Hermès détecté — **natif ou conteneurisé** — là où l'ancien
+  `install-bridge.sh` ne couvrait que le natif. Structuré en `lib/detect.sh`
+  (détection sans effet de bord), `lib/actions.sh` (actions d'installation) et
+  `lib/test-detect.sh` (diagnostic à blanc, à lancer en premier sur une
+  machine cible). Garde-fous : refuse de tourner dans un conteneur
+  (`/.dockerenv`, sinon Docker-dans-Docker) ; réutilise tout Caddy tiers déjà
+  sur `:443` au lieu d'en lancer un second qui crash-looperait (le vrai risque
+  du double-Caddyfile du 2026-07-28) ; tourne sans root si l'utilisateur est
+  dans le groupe docker. Validé de bout en bout sur machine de test pour les
+  trois cas conteneurisés (image nue → refus guidé, image dérivée sans Caddy,
+  image dérivée avec Caddy tiers). Motivé par la migration à venir du VPS vers
+  un homelab où Hermès sera conteneurisé.
+- Image Hermès dérivée `server/hermes-image/` (`FROM nousresearch/hermes-agent`
+  + hermes-webui) pour le mode conteneurisé. hermes-webui n'est pas autonome —
+  il importe le code interne de Hermès (`agent.*`, `hermes_cli.*`, >100
+  imports) — donc il ne peut ni tourner à part ni être ajouté après coup : il
+  est gravé dans l'image comme service s6, supervisé aux côtés de
+  `main-hermes` et `dashboard`. Ce n'est pas un fork : webui est cloné depuis
+  l'amont (`nesquena/hermes-webui@master`, épinglable via `--build-arg
+  WEBUI_REF`), jamais modifié. Le plugin, lui, reste hors image (déposé dans
+  le volume, modifiable sans rebuild). Testé : build, réponse HTTP 200,
+  relance après crash (< 8 s), survie à un redémarrage complet du conteneur.
 - Réveil FCM (Firebase Cloud Messaging) data-only pour les notifications
   proactives — le canal `proactive` existant (WebSocket persistant) ne
   survit pas de façon fiable quand l'app est fermée/en veille (pas de
